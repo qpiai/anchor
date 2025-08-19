@@ -1,4 +1,3 @@
-import yaml
 import re
 from z3 import *
 from typing import Dict, List, Any, Union
@@ -25,9 +24,9 @@ class RuleCompiler:
         self.z3_vars = {}
         self.constraints = []
         
-    def compile_policy(self, policy_yaml: str) -> Dict[str, Any]:
-        """Main entry point - converts YAML policy to Z3 constraints"""
-        policy = yaml.safe_load(policy_yaml)
+    def compile_policy(self, policy_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Main entry point - converts policy dictionary to Z3 constraints"""
+        policy = policy_dict
         
         # Step 1: Create Z3 variables
         self._create_z3_variables(policy['variables'])
@@ -52,7 +51,8 @@ class RuleCompiler:
             'variables': self.z3_vars,
             'rules': z3_rules,
             'constraints': z3_constraints,
-            'variable_metadata': self.variables
+            'variable_metadata': self.variables,
+            'serializable_data': self._create_serializable_data(z3_rules, z3_constraints)
         }
     
     def _create_z3_variables(self, variables: List[Dict]):
@@ -79,6 +79,34 @@ class RuleCompiler:
                                     for val in var['possible_values']])
                 self.constraints.append(enum_constraint)
     
+    def _create_serializable_data(self, z3_rules: List[Dict], z3_constraints: List[Any]) -> Dict[str, Any]:
+        """Create serializable representation of Z3 data"""
+        serializable_rules = []
+        for rule in z3_rules:
+            serializable_rules.append({
+                'id': rule['id'],
+                'description': rule['description'],
+                'constraint_str': str(rule['constraint'])  # Convert Z3 to string
+            })
+        
+        serializable_constraints = [str(constraint) for constraint in z3_constraints]
+        
+        # Also include variable information for reconstruction
+        variable_info = {}
+        for name, var_obj in self.variables.items():
+            variable_info[name] = {
+                'name': var_obj.name,
+                'type': var_obj.type,
+                'description': var_obj.description,
+                'possible_values': var_obj.possible_values
+            }
+        
+        return {
+            'rules': serializable_rules,
+            'constraints': serializable_constraints,
+            'variables': variable_info
+        }
+
     def _compile_rule(self, rule: Dict) -> Any:
         """Compile a single rule to Z3 constraint"""
         condition = self._parse_condition(rule['condition'])

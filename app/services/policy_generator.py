@@ -1,4 +1,4 @@
-import yaml
+import json
 import asyncio
 from typing import Dict, Any, List
 import openai
@@ -49,7 +49,7 @@ class PolicyGeneratorService:
         {document_content}
         
         CRITICAL REQUIREMENTS:
-        1. Output ONLY valid YAML starting with "policy_name:" - no explanations, no markdown blocks
+        1. Output ONLY valid JSON - no explanations, no markdown blocks, no extra text
         2. ALL rule conditions MUST use EXACT variable names with comparison operators
         3. FORBIDDEN: "employee is eligible", "user can", "person may" - these are INVALID
         4. REQUIRED FORMAT: variable_name == "value" AND other_var >= 5
@@ -57,80 +57,54 @@ class PolicyGeneratorService:
         6. STRING VALUES MUST BE IN QUOTES: employee_type == "permanent"
         7. NUMBERS WITHOUT QUOTES: tenure_months >= 12
         8. CONCLUSIONS must be simple text descriptions, NOT variable assignments
+        9. Use "valid" or "invalid" as conclusions for rule enforcement
+        
+        REQUIRED JSON SCHEMA:
+        {{
+          "policy_name": "string",
+          "domain": "string",
+          "version": "1.0", 
+          "description": "string",
+          "variables": [
+            {{
+              "name": "variable_name",
+              "type": "string|number|boolean|enum",
+              "description": "description",
+              "possible_values": ["val1", "val2"]
+            }}
+          ],
+          "rules": [
+            {{
+              "id": "rule_id",
+              "description": "rule description", 
+              "condition": "formal_logical_condition",
+              "conclusion": "valid|invalid",
+              "priority": 1
+            }}
+          ],
+          "constraints": ["constraint1", "constraint2"],
+          "examples": [
+            {{
+              "question": "example question",
+              "variables": {{"var": "value"}},
+              "expected_result": "valid|invalid",
+              "explanation": "why this result"
+            }}
+          ]
+        }}
         
         EXAMPLE GOOD CONDITIONS:
         - employee_type == "permanent" AND tenure_months >= 6
         - leave_type == "vacation" AND requested_days <= 10
         - is_manager == true OR department == "HR"
         
-        EXAMPLE GOOD CONCLUSIONS:
-        - "Employee is eligible for leave"
-        - "Request is approved"
-        - "Additional approval required"
-        
         EXAMPLE BAD CONDITIONS (NEVER USE):
         - employee is eligible for leave
         - user can take vacation
         - person may request time off
         
-        EXAMPLE BAD CONCLUSIONS (NEVER USE):
-        - eligible_for_leave == true
-        - status = "approved"
-        - result := valid
-
-        
-        CRITICAL_YAML_FORMAT:
-        ## CRITICAL: YAML Formatting Rules
-
-        Follow this EXACT indentation pattern:
-
-        ```yaml
-        policy_name: "name_here"
-        domain: "domain_here"
-        version: "1.0"
-        description: "description here"
-
-        variables:
-        - name: "variable_name"
-            type: "string"
-            description: "description here"
-            possible_values: ["val1", "val2"]  # only for enums
-        - name: "another_variable"
-            type: "number"
-            description: "description here"
-
-        rules:
-        - id: "rule_001"
-            description: "rule description"
-            condition: "variable_name == 'value'"
-            conclusion: "valid"
-            priority: 1
-        - id: "rule_002"
-            description: "another rule"
-            condition: "variable_name != 'value'"
-            conclusion: "invalid"
-            priority: 2
-
-        constraints:
-        - "variable_name != ''"
-        - "other_variable > 0"
-
-        examples:
-        - question: "example question"
-            variables:
-            variable_name: "value"
-            other_variable: 42
-            expected_result: "valid"
-            explanation: "explanation here"
-        ```
-
-        INDENTATION RULES:
-        - Top level: NO indentation
-        - List items (-): 2 spaces
-        - Properties under list items: 4 spaces
-        - Use spaces, NEVER tabs
-
-                """
+        Output ONLY the JSON object. Start with {{ and end with }}.
+        """
         
         try:
             if settings.default_llm_provider == "openai" and self.openai_client:
@@ -140,9 +114,9 @@ class PolicyGeneratorService:
             else:
                 raise Exception("No LLM provider configured")
             
-            # Extract and parse the YAML response
-            yaml_content = self._extract_yaml_from_response(response)
-            policy_dict = yaml.safe_load(yaml_content)
+            # Extract and parse the JSON response
+            json_content = self._extract_json_from_response(response)
+            policy_dict = json.loads(json_content)
             
             # Validate the generated policy
             validation_errors = await self.validate_generated_policy(policy_dict)
@@ -163,15 +137,26 @@ class PolicyGeneratorService:
         realistic examples that test edge cases and different scenarios.
         
         Generate 3-5 additional examples in the same format as existing examples.
-        Return only the new examples in YAML format under an 'examples' key.
+        Return only the new examples in JSON format under an 'examples' key.
         """
         
         user_prompt = f"""
         Here is the existing policy:
         
-        {yaml.dump(policy, default_flow_style=False)}
+        {json.dumps(policy, indent=2)}
         
         Generate additional test examples that cover edge cases and different scenarios.
+        Output only JSON in this format:
+        {{
+          "examples": [
+            {{
+              "question": "example question",
+              "variables": {{"var": "value"}},
+              "expected_result": "valid|invalid",
+              "explanation": "explanation"
+            }}
+          ]
+        }}
         """
         
         try:
@@ -180,7 +165,8 @@ class PolicyGeneratorService:
             else:
                 response = await self._generate_with_anthropic(system_prompt, user_prompt)
             
-            new_examples = yaml.safe_load(response)
+            json_content = self._extract_json_from_response(response)
+            new_examples = json.loads(json_content)
             
             # Merge new examples with existing ones
             if 'examples' in new_examples:
@@ -264,120 +250,35 @@ class PolicyGeneratorService:
         return response.content[0].text
     
 
-    def _simple_yaml_fix(self, yaml_content: str) -> str:
-        """Simple fallback YAML fix"""
-        lines = yaml_content.split('\n')
-        fixed = []
-        
-        for line in lines:
-            stripped = line.strip()
-            if not stripped:
-                fixed.append('')
-            elif stripped.startswith('policy_name:') or stripped.startswith('domain:') or stripped.startswith('version:') or stripped.startswith('description:'):
-                fixed.append(stripped)
-            elif stripped.endswith(':') and stripped in ['variables:', 'rules:', 'constraints:', 'examples:']:
-                fixed.append(stripped)
-            elif stripped.startswith('- '):
-                fixed.append('  ' + stripped)
-            elif ':' in stripped:
-                fixed.append('    ' + stripped)
-            else:
-                fixed.append(line)
-        
-        return '\n'.join(fixed)
 
 
-    def _fix_yaml_indentation(self, yaml_content: str) -> str:
-        """Fix YAML indentation issues"""
-        lines = yaml_content.split('\n')
-        fixed_lines = []
-        current_section = None
-        
-        for line in lines:
-            stripped = line.strip()
-            
-            if not stripped:
-                fixed_lines.append('')
-                continue
-            
-            # Top-level keys
-            if stripped.endswith(':') and not stripped.startswith('-'):
-                if stripped.split(':')[0] in ['policy_name', 'domain', 'version', 'description', 'variables', 'rules', 'constraints', 'examples']:
-                    current_section = stripped.split(':')[0]
-                    fixed_lines.append(stripped)
-                    continue
-            
-            # Handle other top-level properties
-            if ':' in stripped and not stripped.startswith('-') and current_section in [None, 'policy_name', 'domain', 'version', 'description']:
-                fixed_lines.append(stripped)
-                continue
-            
-            # List items (variables, rules, examples, constraints)
-            if stripped.startswith('- '):
-                if current_section in ['variables', 'rules', 'examples']:
-                    fixed_lines.append('  ' + stripped)  # 2 spaces
-                else:  # constraints
-                    fixed_lines.append('  ' + stripped)
-                continue
-            
-            # Properties under list items
-            if ':' in stripped and current_section in ['variables', 'rules', 'examples']:
-                fixed_lines.append('    ' + stripped)  # 4 spaces
-                continue
-            
-            # Special handling for examples variables section
-            if current_section == 'examples' and not stripped.startswith('-') and not ':' in stripped:
-                fixed_lines.append('      ' + stripped)  # 6 spaces for nested content
-                continue
-            
-            # Default: preserve line as-is if it already has proper indentation
-            if line.startswith('  '):
-                fixed_lines.append(line)
-            else:
-                fixed_lines.append('  ' + stripped)
-        
-        result = '\n'.join(fixed_lines)
-        
-        # Validate the fixed YAML
-        try:
-            import yaml
-            yaml.safe_load(result)
-            print(f"PolicyGeneratorService: Fixed YAML successfully validated")
-            return result
-        except yaml.YAMLError as e:
-            print(f"PolicyGeneratorService: YAML fix failed, using simple fallback: {e}")
-            return self._simple_yaml_fix(yaml_content)
-
-    def _extract_yaml_from_response(self, response: str) -> str:
-        """Extract and fix YAML content from LLM response"""
+    def _extract_json_from_response(self, response: str) -> str:
+        """Extract JSON content from LLM response"""
         import re
         
         # Remove <think> tags
         response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL)
         
         # Try markdown code blocks first
-        yaml_pattern = r'```(?:yaml|yml)?\s*\n(.*?)\n```'
-        matches = re.findall(yaml_pattern, response, re.DOTALL | re.IGNORECASE)
+        json_pattern = r'```(?:json)?\s*\n(.*?)\n```'
+        matches = re.findall(json_pattern, response, re.DOTALL | re.IGNORECASE)
         
         if matches:
-            yaml_content = matches[0].strip()
-            return self._fix_yaml_indentation(yaml_content)
+            json_content = matches[0].strip()
+            print(f"PolicyGeneratorService: Extracted JSON from code block ({len(json_content)} chars)")
+            return json_content
         
-        # Extract YAML structure
-        lines = response.split('\n')
-        yaml_lines = []
-        in_yaml = False
+        # Try to find JSON structure by looking for braces
+        start_brace = response.find('{')
+        end_brace = response.rfind('}')
         
-        for line in lines:
-            if line.strip().startswith(('policy_name:', 'domain:', 'version:')):
-                in_yaml = True
-            if in_yaml:
-                yaml_lines.append(line)
+        if start_brace != -1 and end_brace != -1 and end_brace > start_brace:
+            json_content = response[start_brace:end_brace+1].strip()
+            print(f"PolicyGeneratorService: Extracted JSON from braces ({len(json_content)} chars)")
+            return json_content
         
-        if yaml_lines:
-            yaml_content = '\n'.join(yaml_lines).strip()
-            return self._fix_yaml_indentation(yaml_content)
-        
+        # Fallback: return original response and let JSON parser handle the error
+        print("PolicyGeneratorService: No JSON structure found, using full response")
         return response.strip()
 
     def _get_policy_generator_prompt(self) -> str:
@@ -386,10 +287,10 @@ class PolicyGeneratorService:
     You are a specialized Policy Generator Agent responsible for converting organizational documents, procedures, and requirements into structured, machine-verifiable policies.
 
     ## CRITICAL: Output Format Requirements
-    - **ONLY output valid YAML**
-    - **NO explanatory text before or after the YAML**
+    - **ONLY output valid JSON**
+    - **NO explanatory text before or after the JSON**
     - **NO markdown code blocks** 
-    - **Start directly with policy_name:**
+    - **Start directly with { and end with }**
 
     ## Rule Structure Requirements
 
@@ -405,55 +306,41 @@ class PolicyGeneratorService:
     - **Numbers without quotes**: salary > 50000
     - **Boolean values**: is_manager == true
 
-    ### Two Approaches for Rules:
-
-    #### Approach 1: Positive Conditions (Recommended)
-    Write conditions that describe VALID scenarios:
-    ```yaml
-    - id: "vacation_approval"
-    condition: "employee_type == 'permanent' AND advance_notice_days >= 14"
-    conclusion: "valid"
-    description: "Permanent employees can take vacation with 2+ weeks notice"
-    ```
-
-    #### Approach 2: Negative Conditions  
-    Write conditions that describe INVALID scenarios:
-    ```yaml
-    - id: "insufficient_notice"
-    condition: "employee_type == 'permanent' AND advance_notice_days < 14"
-    conclusion: "invalid" 
-    description: "Permanent employees need 2+ weeks notice"
-    ```
-
-    ## Required YAML Structure
-    ```yaml
-    policy_name: "descriptive_name"
-    domain: "hr|legal|finance|operations"
-    version: "1.0"
-    description: "Brief description of policy purpose"
-
-    variables:
-    - name: "variable_name"
-        type: "string|number|boolean|date|enum"
-        description: "Clear description for LLM extraction"
-        possible_values: ["value1", "value2"]  # for enums only
-        
-    rules:
-    - id: "rule_001"
-        description: "Human-readable rule description"
-        condition: "variable_name == 'value' AND other_variable > 5"
-        conclusion: "valid"  # or "invalid"
-        priority: 1-10
-        
-    constraints:
-    - "variable_name > 0"  # Global constraints that always apply
-    
-    examples:
-    - question: "Can I take 5 days vacation next month?"
-        variables: {"employee_type": "permanent", "advance_notice_days": 30}
-        expected_result: "valid"
-        explanation: "Permanent employee with sufficient notice"
-    ```
+    ## Required JSON Structure
+    {
+      "policy_name": "descriptive_name",
+      "domain": "hr|legal|finance|operations",
+      "version": "1.0",
+      "description": "Brief description of policy purpose",
+      "variables": [
+        {
+          "name": "variable_name",
+          "type": "string|number|boolean|date|enum",
+          "description": "Clear description for LLM extraction",
+          "possible_values": ["value1", "value2"]
+        }
+      ],
+      "rules": [
+        {
+          "id": "rule_001",
+          "description": "Human-readable rule description",
+          "condition": "variable_name == 'value' AND other_variable > 5",
+          "conclusion": "valid",
+          "priority": 1
+        }
+      ],
+      "constraints": [
+        "variable_name > 0"
+      ],
+      "examples": [
+        {
+          "question": "Can I take 5 days vacation next month?",
+          "variables": {"employee_type": "permanent", "advance_notice_days": 30},
+          "expected_result": "valid",
+          "explanation": "Permanent employee with sufficient notice"
+        }
+      ]
+    }
 
     ## Variable Best Practices
     - **Use enums** for categorical data with known values
@@ -464,32 +351,25 @@ class PolicyGeneratorService:
     ## Rule Writing Patterns
 
     ### Pattern 1: Approval Requirements
-    ```yaml
-    - id: "manager_approval_required"
-    condition: "amount > 1000 AND has_manager_approval == true"
-    conclusion: "valid"
-    ```
+    {
+      "id": "manager_approval_required",
+      "condition": "amount > 1000 AND has_manager_approval == true",
+      "conclusion": "valid"
+    }
 
     ### Pattern 2: Eligibility Rules  
-    ```yaml
-    - id: "employee_eligibility"
-    condition: "employee_type == 'contractor'"
-    conclusion: "invalid"
-    ```
+    {
+      "id": "employee_eligibility",
+      "condition": "employee_type == 'contractor'",
+      "conclusion": "invalid"
+    }
 
     ### Pattern 3: Time-based Rules
-    ```yaml
-    - id: "advance_notice"
-    condition: "notice_days >= 14 AND request_type == 'vacation'"
-    conclusion: "valid"
-    ```
-
-    ### Pattern 4: Hierarchical Approval
-    ```yaml
-    - id: "ceo_approval_large"
-    condition: "amount > 100000 AND has_ceo_approval == true"
-    conclusion: "valid"
-    ```
+    {
+      "id": "advance_notice",
+      "condition": "notice_days >= 14 AND request_type == 'vacation'",
+      "conclusion": "valid"
+    }
 
     Remember: Each rule should be atomic and test one specific aspect of the policy.
     """

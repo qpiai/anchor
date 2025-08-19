@@ -5,7 +5,7 @@ import uuid
 import pickle
 
 from ..core.database import get_db
-from ..models.database import Policy, PolicyCompilation, Verification, VerificationResult
+from ..models.database import Policy, PolicyCompilation, Verification, VerificationResult, CompilationStatus
 from ..models.schemas import (
     VerificationRequest, VerificationResponse, VerificationHistoryResponse
 )
@@ -35,7 +35,7 @@ async def verify_policy(
     latest_compilation = (
         db.query(PolicyCompilation)
         .filter(PolicyCompilation.policy_id == policy_id)
-        .filter(PolicyCompilation.compilation_status == "success")
+        .filter(PolicyCompilation.compilation_status == CompilationStatus.SUCCESS)
         .order_by(PolicyCompilation.compiled_at.desc())
         .first()
     )
@@ -234,7 +234,7 @@ async def batch_verify(
     latest_compilation = (
         db.query(PolicyCompilation)
         .filter(PolicyCompilation.policy_id == policy_id)
-        .filter(PolicyCompilation.compilation_status == "success")
+        .filter(PolicyCompilation.compilation_status == CompilationStatus.SUCCESS)
         .order_by(PolicyCompilation.compiled_at.desc())
         .first()
     )

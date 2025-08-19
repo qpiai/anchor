@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 import uuid
-import yaml
 import pickle
+import base64
 from datetime import datetime
+from typing import Dict, Any
 
 from ..core.database import get_db
 from ..models.database import Policy, PolicyCompilation, PolicyStatus, CompilationStatus
@@ -25,14 +26,19 @@ async def compile_policy(policy_id: uuid.UUID, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Policy not found")
     
     try:
-        # Convert policy to YAML format for compilation
-        policy_yaml = _convert_policy_to_yaml(policy)
+        # Convert policy to dict format for compilation
+        policy_dict = _convert_policy_to_dict(policy)
         
         # Compile using rule compiler
-        compiled_result = rule_compiler.compile_policy(policy_yaml)
+        compiled_result = rule_compiler.compile_policy(policy_dict)
         
-        # Serialize Z3 constraints for storage
-        serialized_constraints = pickle.dumps(compiled_result).decode('latin-1')
+        # Store both the serializable data and the original policy for reconstruction
+        storage_data = {
+            'serializable_data': compiled_result['serializable_data'],
+            'original_policy': policy_dict
+        }
+        # Use base64 encoding to safely store binary data as text
+        serialized_constraints = base64.b64encode(pickle.dumps(storage_data)).decode('utf-8')
         
         # Create compilation record
         compilation = PolicyCompilation(
@@ -159,11 +165,8 @@ async def validate_policy_structure(policy_id: uuid.UUID, db: Session = Depends(
         raise HTTPException(status_code=404, detail="Policy not found")
     
     try:
-        # Convert to YAML and validate structure
-        policy_yaml = _convert_policy_to_yaml(policy)
-        
-        # Parse YAML to check structure
-        policy_dict = yaml.safe_load(policy_yaml)
+        # Convert to dict and validate structure
+        policy_dict = _convert_policy_to_dict(policy)
         
         # Basic validation
         errors = []
@@ -211,8 +214,8 @@ async def validate_policy_structure(policy_id: uuid.UUID, db: Session = Depends(
             "warnings": []
         }
 
-def _convert_policy_to_yaml(policy: Policy) -> str:
-    """Convert Policy database model to YAML format for compilation"""
+def _convert_policy_to_dict(policy: Policy) -> Dict[str, Any]:
+    """Convert Policy database model to dictionary format for compilation"""
     
     policy_dict = {
         "policy_name": policy.name,
@@ -225,4 +228,4 @@ def _convert_policy_to_yaml(policy: Policy) -> str:
         "examples": policy.examples or []
     }
     
-    return yaml.dump(policy_dict, default_flow_style=False) 
+    return policy_dict 

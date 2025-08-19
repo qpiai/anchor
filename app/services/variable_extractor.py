@@ -76,8 +76,26 @@ class VariableExtractorService:
             else:
                 raise Exception("No LLM provider configured")
             
+            # Log the raw response for debugging
+            print(f"Raw LLM response: {repr(response)}")
+            
+            if not response or not response.strip():
+                raise Exception("LLM returned empty response")
+            
+            # Try to extract JSON from response if it contains extra text
+            response_text = response.strip()
+            
+            # Look for JSON in the response
+            json_start = response_text.find('{')
+            json_end = response_text.rfind('}') + 1
+            
+            if json_start >= 0 and json_end > json_start:
+                json_text = response_text[json_start:json_end]
+            else:
+                json_text = response_text
+            
             # Parse the JSON response
-            extracted_variables = json.loads(response)
+            extracted_variables = json.loads(json_text)
             
             # Validate extracted variables
             validation_errors = await self.validate_extracted_variables(extracted_variables, policy_variables)
@@ -88,8 +106,10 @@ class VariableExtractorService:
             return extracted_variables
             
         except json.JSONDecodeError as e:
+            print(f"Failed to parse JSON from response: {repr(response)}")
             raise Exception(f"Failed to parse variable extraction response: {str(e)}")
         except Exception as e:
+            print(f"Variable extraction error: {str(e)}")
             raise Exception(f"Variable extraction failed: {str(e)}")
     
     async def validate_extracted_variables(self, variables: Dict[str, Any], policy_variables: List[Dict]) -> List[str]:

@@ -49,22 +49,39 @@ class VariableExtractorService:
                 variables_description += f"  possible_values: {var['possible_values']}\n"
         
         user_prompt = f"""
-        Extract variable values from the following Q&A pair based on the policy variables defined below.
+        Extract variable values from the following Q&A pair, but ONLY for the variables defined in the policy below.
 
-        Policy Variables:
+        Policy Variables (THE ONLY VARIABLES YOU CAN EXTRACT):
         {variables_description}
 
         Q&A Pair:
         Question: "{question}"
         Answer: "{answer}"
 
-        Extract the variable values and return them as a JSON object. If a variable cannot be determined from the Q&A, omit it from the result. Only include variables that can be clearly inferred.
+        CRITICAL INSTRUCTIONS:
+        1. You MUST provide a response for EVERY variable in the Policy Variables list above
+        2. Map natural language concepts to these specific defined variables
+        3. If the Q&A mentions concepts not covered by the defined variables, ignore them
+        4. Use variable descriptions to understand what each variable represents
+        5. For enum variables, match to the exact possible_values provided
+        6. For boolean variables, interpret yes/no, approval/denial, present/absent
+        7. For numeric variables, extract specific numbers mentioned
+        8. If a defined variable cannot be determined from the text, set its value to null
 
-        Example output format:
+
+        
+        Example Mapping Guidelines:
+        - "full-time employee" → employee_type: "full_time" (if employee_type is defined)
+        - "manager approved" → has_manager_approval: true (if has_manager_approval is defined)
+        - "$150 expense" → expense_amount: 150 (if expense_amount is defined)
+        - "wearing safety gear" → safety_gear_worn: true (if safety_gear_worn is defined)
+
+        Return a JSON object with ALL defined variables - use null for unknown values.
         {{
-            "variable_name": "extracted_value",
-            "another_variable": 42,
-            "boolean_variable": true
+            "defined_variable_1": "extracted_value",
+            "defined_variable_2": 42,
+            "defined_variable_3": null,
+            "defined_variable_4": true
         }}
         """
         
@@ -97,6 +114,9 @@ class VariableExtractorService:
             # Parse the JSON response
             extracted_variables = json.loads(json_text)
             
+            # Apply default values for missing but inferable variables
+            extracted_variables = self._apply_default_values(extracted_variables, policy_variables)
+            
             # Validate extracted variables
             validation_errors = await self.validate_extracted_variables(extracted_variables, policy_variables)
             if validation_errors:
@@ -124,10 +144,18 @@ class VariableExtractorService:
                 errors.append(f"Unknown variable: {var_name}")
                 continue
             
+            # Skip validation for special markers
+            if var_value in ["MISSING_MANDATORY", "SKIP_RULE"]:
+                continue
+                
+            # Skip validation for null values (they're handled in the processing logic)
+            if var_value is None:
+                continue
+            
             policy_var = policy_var_lookup[var_name]
             var_type = policy_var['type']
             
-            # Type validation
+            # Type validation for actual values only
             if var_type == 'string' and not isinstance(var_value, str):
                 errors.append(f"Variable {var_name} should be string, got {type(var_value)}")
             elif var_type == 'number' and not isinstance(var_value, (int, float)):
@@ -140,6 +168,46 @@ class VariableExtractorService:
                     errors.append(f"Variable {var_name} value '{var_value}' not in possible values: {possible_values}")
         
         return errors
+    
+    def _apply_default_values(self, extracted_variables: Dict[str, Any], policy_variables: List[Dict]) -> Dict[str, Any]:
+        """Return ALL policy variables with comprehensive state handling"""
+        result = {}
+        
+        # Go through every defined policy variable
+        for policy_var in policy_variables:
+            var_name = policy_var['name']
+            is_mandatory = policy_var.get('is_mandatory', True)
+            has_default = policy_var.get('default_value') is not None
+            
+            extracted_value = extracted_variables.get(var_name)
+            
+            if extracted_value is not None:
+                # Case 1: Successfully extracted (not null)
+                result[var_name] = extracted_value
+            
+            elif has_default:
+                # Case 2: Not extracted but has default value
+                default_value = policy_var['default_value']
+                # Convert default based on type
+                if policy_var['type'] == 'boolean':
+                    result[var_name] = str(default_value).lower() == 'true'
+                elif policy_var['type'] == 'number':
+                    result[var_name] = float(default_value) if '.' in str(default_value) else int(default_value)
+                else:
+                    result[var_name] = default_value
+            
+            elif is_mandatory:
+                # Case 3: Mandatory variable not extracted and no default
+                # Mark as missing - this will trigger clarifying questions
+                result[var_name] = "MISSING_MANDATORY"
+            
+            else:
+                # Case 4: Optional variable not extracted and no default
+                # Mark for rule skipping
+                result[var_name] = "SKIP_RULE"
+        
+        return result
+    
     
     async def _generate_with_openai(self, system_prompt: str, user_prompt: str) -> str:
         """Generate response using OpenAI"""
@@ -168,29 +236,35 @@ class VariableExtractorService:
     def _get_variable_extractor_prompt(self) -> str:
         """Get the system prompt for variable extraction"""
         return """
-You are a Variable Extractor Agent. Your job is to analyze question-answer pairs and extract specific variable values based on policy variable definitions.
+You are a Policy-Constrained Variable Extractor Agent. Your job is to extract ONLY the specific variables defined in the policy from natural language question-answer pairs.
+
+## CRITICAL CONSTRAINT
+You can ONLY extract variables that are explicitly defined in the policy variable list provided. Do NOT create, infer, or extract any variables beyond what is defined in the policy.
 
 ## Core Responsibilities
-1. **Parse Natural Language**: Understand the meaning and context in Q&A pairs
-2. **Extract Values**: Identify and extract specific variable values mentioned or implied
-3. **Type Conversion**: Convert extracted values to the correct data types
-4. **Precision**: Only extract variables that are clearly determinable from the text
+1. **Policy-First Mapping**: Map natural language concepts to the exact variables defined in the policy
+2. **Constrained Extraction**: Extract values for defined variables only, ignore everything else
+3. **Type Conversion**: Convert extracted values to match the defined variable types
+4. **Conservative Approach**: When unclear, omit the variable rather than guess
 
-## Extraction Guidelines
+## Extraction Strategy
 
-### 1. Be Conservative
-- Only extract variables that are clearly mentioned or strongly implied
-- When in doubt, omit the variable rather than guess
-- Don't make assumptions about missing information
+### 1. Policy Variable Mapping
+- Study the provided policy variables carefully (name, type, description, possible_values)
+- Map natural language concepts to these specific variables
+- Use variable descriptions to understand what each variable represents
+- If text mentions concepts not covered by defined variables, ignore them
 
-### 2. Handle Different Phrasings
-- Look for synonyms and alternative expressions
-- Consider context clues and implicit information
+### 2. Natural Language Understanding
+- Look for synonyms and different phrasings of the defined variables
+- Consider context clues that indicate specific variable values
 - Handle casual language and colloquialisms
+- Map business terms to formal variable names
 
 ### 3. Type Handling
-- **Numbers**: Extract numeric values (integers or floats)
-- **Strings**: Extract text values, normalize when appropriate
+- **Numbers**: Extract numeric values for number-type variables
+- **Enums**: Match text to the closest valid option from possible_values
+- **Booleans**: Interpret yes/no, positive/negative, present/absent indicators
 - **Booleans**: Convert yes/no, true/false, positive/negative statements
 - **Enums**: Match to closest valid enum value
 - **Dates**: Convert date expressions to appropriate format
@@ -200,6 +274,13 @@ You are a Variable Extractor Agent. Your job is to analyze question-answer pairs
 - **Quantities**: "5 days", "more than 10", "at least 2 weeks"
 - **Approvals**: "manager approved", "got permission", "authorized by"
 - **Types/Categories**: Match text to enum categories
+- **Employment types**: "full-time" typically means 40+ hours/week, "part-time" typically means <40 hours/week
+
+### 5. Default Values and Assumptions
+When certain variables are not explicitly mentioned but can be reasonably inferred:
+- **full_time employees**: Assume hours_per_week = 40 unless stated otherwise
+- **part_time employees**: Assume hours_per_week = 20 unless stated otherwise
+- **contractor employees**: Assume hours_per_week = 30 unless stated otherwise
 
 ## Output Format
 Return only valid JSON with extracted variables:

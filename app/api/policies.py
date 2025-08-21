@@ -1,15 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 from typing import List
 import uuid
 from datetime import datetime
 
 from ..core.database import get_db
-from ..models.database import Policy, PolicyDocument
+from ..models.database import Policy, PolicyDocument, PolicyStatus
 from ..models.schemas import (
     PolicyResponse, PolicyCreate, PolicyUpdate, PolicyStatusResponse,
     ErrorResponse
 )
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/policies", tags=["policies"])
 
@@ -47,7 +49,7 @@ async def update_policy(
     
     # Reset status to draft if content was modified
     if any(field in update_data for field in ['variables', 'rules', 'constraints']):
-        policy.status = "draft"
+        policy.status = PolicyStatus.DRAFT
     
     db.commit()
     db.refresh(policy)
@@ -186,4 +188,353 @@ async def clone_policy(
     db.commit()
     db.refresh(cloned_policy)
     
-    return cloned_policy 
+    return cloned_policy
+
+class VariableUpdateRequest(BaseModel):
+    is_mandatory: bool = None
+    default_value: str = None
+
+@router.patch("/{policy_id}/variables/{variable_name}")
+async def update_policy_variable(
+    policy_id: uuid.UUID,
+    variable_name: str,
+    request: VariableUpdateRequest,
+    db: Session = Depends(get_db)
+):
+    """Update specific properties of a policy variable"""
+    
+    policy = db.query(Policy).filter(Policy.id == policy_id).first()
+    
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    
+    if not policy.variables:
+        raise HTTPException(status_code=400, detail="Policy has no variables")
+    
+    # Find the variable to update
+    variables = policy.variables.copy()
+    variable_found = False
+    
+    for i, var in enumerate(variables):
+        if var['name'] == variable_name:
+            variable_found = True
+            # Update only provided fields
+            if request.is_mandatory is not None:
+                variables[i]['is_mandatory'] = request.is_mandatory
+            if request.default_value is not None:
+                if request.default_value == "":  # Empty string means remove default
+                    variables[i].pop('default_value', None)
+                else:
+                    variables[i]['default_value'] = request.default_value
+            break
+    
+    if not variable_found:
+        raise HTTPException(status_code=404, detail=f"Variable '{variable_name}' not found")
+    
+    # Update the policy
+    policy.variables = variables
+    policy.updated_at = datetime.utcnow()
+    # Reset status to draft since variables changed
+    policy.status = PolicyStatus.DRAFT
+    
+    # Flag the JSON field as modified so SQLAlchemy detects the change
+    flag_modified(policy, 'variables')
+    
+    db.commit()
+    db.refresh(policy)
+    
+    return {"message": f"Variable '{variable_name}' updated successfully", "policy": policy}
+
+# Additional request models for CRUD operations
+class VariableCreateRequest(BaseModel):
+    name: str
+    type: str  # string, number, boolean, enum, date
+    description: str
+    possible_values: List[str] = None
+    is_mandatory: bool = True
+    default_value: str = None
+
+class RuleCreateRequest(BaseModel):
+    id: str
+    description: str
+    condition: str
+    conclusion: str  # valid, invalid
+    priority: int = 1
+
+class RuleUpdateRequest(BaseModel):
+    description: str = None
+    condition: str = None
+    conclusion: str = None
+    priority: int = None
+
+# Variable CRUD endpoints
+@router.post("/{policy_id}/variables")
+async def add_policy_variable(
+    policy_id: uuid.UUID,
+    request: VariableCreateRequest,
+    db: Session = Depends(get_db)
+):
+    """Add a new variable to the policy"""
+    
+    policy = db.query(Policy).filter(Policy.id == policy_id).first()
+    
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    
+    variables = policy.variables.copy() if policy.variables else []
+    
+    # Check if variable name already exists
+    if any(var['name'] == request.name for var in variables):
+        raise HTTPException(status_code=400, detail=f"Variable '{request.name}' already exists")
+    
+    # Create new variable
+    new_variable = {
+        "name": request.name,
+        "type": request.type,
+        "description": request.description,
+        "is_mandatory": request.is_mandatory
+    }
+    
+    if request.possible_values:
+        new_variable["possible_values"] = request.possible_values
+    
+    if request.default_value:
+        new_variable["default_value"] = request.default_value
+    
+    variables.append(new_variable)
+    
+    # Update policy
+    policy.variables = variables
+    policy.updated_at = datetime.utcnow()
+    policy.status = PolicyStatus.DRAFT
+    
+    db.commit()
+    db.refresh(policy)
+    
+    return {"message": f"Variable '{request.name}' added successfully", "policy": policy}
+
+@router.delete("/{policy_id}/variables/{variable_name}")
+async def delete_policy_variable(
+    policy_id: uuid.UUID,
+    variable_name: str,
+    db: Session = Depends(get_db)
+):
+    """Delete a variable from the policy"""
+    
+    policy = db.query(Policy).filter(Policy.id == policy_id).first()
+    
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    
+    if not policy.variables:
+        raise HTTPException(status_code=400, detail="Policy has no variables")
+    
+    # Remove the variable
+    variables = [var for var in policy.variables if var['name'] != variable_name]
+    
+    if len(variables) == len(policy.variables):
+        raise HTTPException(status_code=404, detail=f"Variable '{variable_name}' not found")
+    
+    # Update policy
+    policy.variables = variables
+    policy.updated_at = datetime.utcnow()
+    policy.status = PolicyStatus.DRAFT
+    
+    db.commit()
+    db.refresh(policy)
+    
+    return {"message": f"Variable '{variable_name}' deleted successfully", "policy": policy}
+
+# Rule CRUD endpoints
+@router.post("/{policy_id}/rules")
+async def add_policy_rule(
+    policy_id: uuid.UUID,
+    request: RuleCreateRequest,
+    db: Session = Depends(get_db)
+):
+    """Add a new rule to the policy"""
+    
+    policy = db.query(Policy).filter(Policy.id == policy_id).first()
+    
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    
+    rules = policy.rules.copy() if policy.rules else []
+    
+    # Check if rule ID already exists
+    if any(rule['id'] == request.id for rule in rules):
+        raise HTTPException(status_code=400, detail=f"Rule '{request.id}' already exists")
+    
+    # Create new rule
+    new_rule = {
+        "id": request.id,
+        "description": request.description,
+        "condition": request.condition,
+        "conclusion": request.conclusion,
+        "priority": request.priority
+    }
+    
+    rules.append(new_rule)
+    
+    # Update policy
+    policy.rules = rules
+    policy.updated_at = datetime.utcnow()
+    policy.status = PolicyStatus.DRAFT
+    
+    # Flag the JSON field as modified so SQLAlchemy detects the change
+    flag_modified(policy, 'rules')
+    
+    db.commit()
+    db.refresh(policy)
+    
+    return {"message": f"Rule '{request.id}' added successfully", "policy": policy}
+
+@router.patch("/{policy_id}/rules/{rule_id}")
+async def update_policy_rule(
+    policy_id: uuid.UUID,
+    rule_id: str,
+    request: RuleUpdateRequest,
+    db: Session = Depends(get_db)
+):
+    """Update a specific rule in the policy"""
+    
+    policy = db.query(Policy).filter(Policy.id == policy_id).first()
+    
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    
+    if not policy.rules:
+        raise HTTPException(status_code=400, detail="Policy has no rules")
+    
+    # Find and update the rule
+    rules = policy.rules.copy()
+    rule_found = False
+    
+    for i, rule in enumerate(rules):
+        if rule['id'] == rule_id:
+            rule_found = True
+            # Update only provided fields
+            if request.description is not None:
+                rules[i]['description'] = request.description
+            if request.condition is not None:
+                rules[i]['condition'] = request.condition
+            if request.conclusion is not None:
+                rules[i]['conclusion'] = request.conclusion
+            if request.priority is not None:
+                rules[i]['priority'] = request.priority
+            break
+    
+    if not rule_found:
+        raise HTTPException(status_code=404, detail=f"Rule '{rule_id}' not found")
+    
+    # Update policy
+    policy.rules = rules
+    policy.updated_at = datetime.utcnow()
+    policy.status = PolicyStatus.DRAFT
+    
+    # Flag the JSON field as modified so SQLAlchemy detects the change
+    flag_modified(policy, 'rules')
+    
+    db.commit()
+    db.refresh(policy)
+    
+    return {"message": f"Rule '{rule_id}' updated successfully", "policy": policy}
+
+@router.delete("/{policy_id}/rules/{rule_id}")
+async def delete_policy_rule(
+    policy_id: uuid.UUID,
+    rule_id: str,
+    db: Session = Depends(get_db)
+):
+    """Delete a rule from the policy"""
+    
+    policy = db.query(Policy).filter(Policy.id == policy_id).first()
+    
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    
+    if not policy.rules:
+        raise HTTPException(status_code=400, detail="Policy has no rules")
+    
+    # Remove the rule
+    rules = [rule for rule in policy.rules if rule['id'] != rule_id]
+    
+    if len(rules) == len(policy.rules):
+        raise HTTPException(status_code=404, detail=f"Rule '{rule_id}' not found")
+    
+    # Update policy
+    policy.rules = rules
+    policy.updated_at = datetime.utcnow()
+    policy.status = PolicyStatus.DRAFT
+    
+    # Flag the JSON field as modified so SQLAlchemy detects the change
+    flag_modified(policy, 'rules')
+    
+    db.commit()
+    db.refresh(policy)
+    
+    return {"message": f"Rule '{rule_id}' deleted successfully", "policy": policy}
+
+# Constraints CRUD endpoints
+@router.post("/{policy_id}/constraints")
+async def add_policy_constraint(
+    policy_id: uuid.UUID,
+    constraint: str,
+    db: Session = Depends(get_db)
+):
+    """Add a new constraint to the policy"""
+    
+    policy = db.query(Policy).filter(Policy.id == policy_id).first()
+    
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    
+    constraints = policy.constraints.copy() if policy.constraints else []
+    
+    # Check if constraint already exists
+    if constraint in constraints:
+        raise HTTPException(status_code=400, detail="Constraint already exists")
+    
+    constraints.append(constraint)
+    
+    # Update policy
+    policy.constraints = constraints
+    policy.updated_at = datetime.utcnow()
+    policy.status = PolicyStatus.DRAFT
+    
+    db.commit()
+    db.refresh(policy)
+    
+    return {"message": "Constraint added successfully", "policy": policy}
+
+@router.delete("/{policy_id}/constraints")
+async def delete_policy_constraint(
+    policy_id: uuid.UUID,
+    constraint: str,
+    db: Session = Depends(get_db)
+):
+    """Delete a constraint from the policy"""
+    
+    policy = db.query(Policy).filter(Policy.id == policy_id).first()
+    
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    
+    if not policy.constraints:
+        raise HTTPException(status_code=400, detail="Policy has no constraints")
+    
+    # Remove the constraint
+    constraints = [c for c in policy.constraints if c != constraint]
+    
+    if len(constraints) == len(policy.constraints):
+        raise HTTPException(status_code=404, detail="Constraint not found")
+    
+    # Update policy
+    policy.constraints = constraints
+    policy.updated_at = datetime.utcnow()
+    policy.status = PolicyStatus.DRAFT
+    
+    db.commit()
+    db.refresh(policy)
+    
+    return {"message": "Constraint deleted successfully", "policy": policy} 

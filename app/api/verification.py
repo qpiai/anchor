@@ -48,23 +48,46 @@ async def verify_policy(
     
     try:
         # Extract variables from Q&A pair
-        extracted_variables = await variable_extractor.extract_variables(
-            request.question,
-            request.answer,
-            policy.variables or []
-        )
+        print(f"Debug: Starting variable extraction for policy {policy_id}")
+        try:
+            extracted_variables = await variable_extractor.extract_variables(
+                request.question,
+                request.answer,
+                policy.variables or []
+            )
+            print(f"Debug: Variable extraction successful, extracted: {len(extracted_variables)} variables")
+        except Exception as e:
+            print(f"Debug: Variable extraction failed: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Variable extraction failed: {str(e)}")
         
         # Verify using Z3
-        verification_result = verification_service.verify_scenario(
-            extracted_variables,
-            latest_compilation.z3_constraints,
-            policy.rules or []
-        )
+        print(f"Debug: Starting Z3 verification")
+        try:
+            verification_result = verification_service.verify_scenario(
+                extracted_variables,
+                latest_compilation.z3_constraints,
+                policy.rules or []
+            )
+            print(f"Debug: Z3 verification successful, result: {verification_result.get('result', 'unknown')}")
+        except Exception as e:
+            print(f"Debug: Z3 verification failed: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Z3 verification failed: {str(e)}")
         
         # Determine result enum
-        result_enum = VerificationResult.VALID if verification_result['result'] == 'valid' else (
-            VerificationResult.INVALID if verification_result['result'] == 'invalid' else VerificationResult.ERROR
-        )
+        print(f"Debug: Mapping result '{verification_result['result']}' to enum")
+        try:
+            if verification_result['result'] == 'valid':
+                result_enum = VerificationResult.VALID
+            elif verification_result['result'] == 'invalid':
+                result_enum = VerificationResult.INVALID
+            elif verification_result['result'] == 'needs_clarification':
+                result_enum = VerificationResult.NEEDS_CLARIFICATION
+            else:
+                result_enum = VerificationResult.ERROR
+            print(f"Debug: Enum mapping successful: {result_enum}")
+        except Exception as e:
+            print(f"Debug: Enum mapping failed: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Result enum mapping failed: {str(e)}")
         
         # Store verification in database
         verification = Verification(
@@ -72,7 +95,7 @@ async def verify_policy(
             question=request.question,
             answer=request.answer,
             extracted_variables=extracted_variables,
-            verification_result=result_enum,
+            verification_result=result_enum.value,  # Use .value to get string value
             explanation=verification_result['explanation'],
             suggestions=verification_result['suggestions']
         )
@@ -263,15 +286,23 @@ async def batch_verify(
                 policy.rules or []
             )
             
+            # Determine result enum for batch processing
+            if verification_result['result'] == 'valid':
+                batch_result_enum = VerificationResult.VALID
+            elif verification_result['result'] == 'invalid':
+                batch_result_enum = VerificationResult.INVALID
+            elif verification_result['result'] == 'needs_clarification':
+                batch_result_enum = VerificationResult.NEEDS_CLARIFICATION
+            else:
+                batch_result_enum = VerificationResult.ERROR
+                
             # Store in database
             verification = Verification(
                 policy_id=policy_id,
                 question=request.question,
                 answer=request.answer,
                 extracted_variables=extracted_variables,
-                verification_result=VerificationResult.VALID if verification_result['result'] == 'valid' else (
-                    VerificationResult.INVALID if verification_result['result'] == 'invalid' else VerificationResult.ERROR
-                ),
+                verification_result=batch_result_enum.value,  # Use .value to get the string value
                 explanation=verification_result['explanation'],
                 suggestions=verification_result['suggestions']
             )

@@ -70,7 +70,9 @@ class PolicyGeneratorService:
               "name": "variable_name",
               "type": "string|number|boolean|enum",
               "description": "description",
-              "possible_values": ["val1", "val2"]
+              "possible_values": ["val1", "val2"],
+              "is_mandatory": true,
+              "default_value": "optional_default"
             }}
           ],
           "rules": [
@@ -317,7 +319,9 @@ class PolicyGeneratorService:
           "name": "variable_name",
           "type": "string|number|boolean|date|enum",
           "description": "Clear description for LLM extraction",
-          "possible_values": ["value1", "value2"]
+          "possible_values": ["value1", "value2"],
+          "is_mandatory": true,
+          "default_value": "optional_default"
         }
       ],
       "rules": [
@@ -347,6 +351,12 @@ class PolicyGeneratorService:
     - **Add approval variables** like "has_manager_approval" for workflow rules
     - **Include sufficient context** in descriptions for extraction
     - **Use boolean flags** for yes/no decisions
+    
+    ## Mandatory vs Optional Variables
+    - **is_mandatory: true** - Required for policy evaluation (e.g., employee_id, request_amount)
+    - **is_mandatory: false** - Optional variables that may not always be available
+    - **default_value** - Used when optional variables cannot be extracted from text
+    - **No default_value** - Rules using this optional variable will be skipped if unknown
 
     ## Rule Writing Patterns
 

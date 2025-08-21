@@ -17,6 +17,7 @@ class VerificationResult(str, Enum):
     VALID = "valid"
     INVALID = "invalid"
     ERROR = "error"
+    NEEDS_CLARIFICATION = "needs_clarification"
 
 # Document schemas
 class DocumentUploadResponse(BaseModel):
@@ -40,6 +41,8 @@ class PolicyVariable(BaseModel):
     type: str  # string, number, boolean, date, enum
     description: str
     possible_values: Optional[List[str]] = None
+    is_mandatory: bool = True
+    default_value: Optional[str] = None
 
 class PolicyRule(BaseModel):
     id: str

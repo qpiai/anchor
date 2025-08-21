@@ -1,3 +1,4 @@
+import yaml
 import re
 from z3 import *
 from typing import Dict, List, Any, Union
@@ -9,8 +10,6 @@ class PolicyVariable:
     type: str
     description: str
     possible_values: List[str] = None
-    is_mandatory: bool = True
-    default_value: str = None
 
 @dataclass
 class PolicyRule:
@@ -26,9 +25,9 @@ class RuleCompiler:
         self.z3_vars = {}
         self.constraints = []
         
-    def compile_policy(self, policy_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Main entry point - converts policy dictionary to Z3 constraints"""
-        policy = policy_dict
+    def compile_policy(self, policy_yaml: str) -> Dict[str, Any]:
+        """Main entry point - converts YAML policy to Z3 constraints"""
+        policy = yaml.safe_load(policy_yaml)
         
         # Step 1: Create Z3 variables
         self._create_z3_variables(policy['variables'])
@@ -36,13 +35,11 @@ class RuleCompiler:
         # Step 2: Compile rules to Z3 constraints
         z3_rules = []
         for rule in policy['rules']:
-            compiled_rule = self._compile_rule(rule)
+            z3_constraint = self._compile_rule(rule)
             z3_rules.append({
                 'id': rule['id'],
-                'constraint': compiled_rule['constraint'],
-                'conclusion': compiled_rule['conclusion'],
-                'description': rule['description'],
-                'original_rule': rule
+                'constraint': z3_constraint,
+                'description': rule['description']
             })
         
         # Step 3: Compile global constraints
@@ -55,8 +52,7 @@ class RuleCompiler:
             'variables': self.z3_vars,
             'rules': z3_rules,
             'constraints': z3_constraints,
-            'variable_metadata': self.variables,
-            'serializable_data': self._create_serializable_data(z3_rules, z3_constraints)
+            'variable_metadata': self.variables
         }
     
     def _create_z3_variables(self, variables: List[Dict]):
@@ -83,65 +79,30 @@ class RuleCompiler:
                                     for val in var['possible_values']])
                 self.constraints.append(enum_constraint)
     
-    def _create_serializable_data(self, z3_rules: List[Dict], z3_constraints: List[Any]) -> Dict[str, Any]:
-        """Create serializable representation of Z3 data"""
-        serializable_rules = []
-        for rule in z3_rules:
-            serializable_rules.append({
-                'id': rule['id'],
-                'description': rule['description'],
-                'constraint_str': str(rule['constraint'])  # Convert Z3 to string
-            })
-        
-        serializable_constraints = [str(constraint) for constraint in z3_constraints]
-        
-        # Also include variable information for reconstruction
-        variable_info = {}
-        for name, var_obj in self.variables.items():
-            variable_info[name] = {
-                'name': var_obj.name,
-                'type': var_obj.type,
-                'description': var_obj.description,
-                'possible_values': var_obj.possible_values
-            }
-        
-        return {
-            'rules': serializable_rules,
-            'constraints': serializable_constraints,
-            'variables': variable_info
-        }
-
-    def _compile_rule(self, rule: Dict) -> Dict[str, Any]:
-        """Compile a single rule to Z3 constraint with metadata
-        
-        Rules should be interpreted as logical implications:
-        - 'valid' conclusion: IF condition THEN scenario is valid  
-        - 'invalid' conclusion: IF condition THEN scenario is invalid
-        
-        Returns dict with constraint, condition, conclusion for better evaluation
-        """
+    def _compile_rule(self, rule: Dict) -> Any:
+        """Compile a single rule to Z3 constraint"""
         condition = self._parse_condition(rule['condition'])
         
-        return {
-            'constraint': condition,
-            'conclusion': rule['conclusion'],
-            'original_rule': rule
-        }
+        if rule['conclusion'] == 'valid':
+            # Rule passes when condition is true
+            return condition
+        elif rule['conclusion'] == 'invalid':
+            # Rule fails when condition is true (so we negate it)
+            return Not(condition)
+        else:
+            # Custom conclusion - more complex logic
+            conclusion = self._parse_condition(rule['conclusion'])
+            return Implies(condition, conclusion)
     
     def _parse_condition(self, condition: str) -> Any:
         """Parse logical condition string into Z3 expression"""
         # Clean up the condition string
         condition = condition.strip()
         
-        # Handle parentheses at the top level first
-        if condition.startswith('(') and condition.endswith(')'):
-            # Remove outer parentheses and parse the inner content
-            return self._parse_condition(condition[1:-1])
-        
         # Handle logical operators (order matters!)
-        if ' OR ' in condition and not self._is_in_parentheses(condition, ' OR '):
+        if ' OR ' in condition:
             return self._parse_or_condition(condition)
-        elif ' AND ' in condition and not self._is_in_parentheses(condition, ' AND '):
+        elif ' AND ' in condition:
             return self._parse_and_condition(condition)
         elif condition.startswith('NOT '):
             inner = condition[4:].strip()
@@ -149,109 +110,24 @@ class RuleCompiler:
         else:
             return self._parse_atomic_condition(condition)
     
-    def _is_in_parentheses(self, text: str, operator: str) -> bool:
-        """Check if ALL instances of operator are within parentheses"""
-        paren_depth = 0
-        i = 0
-        while i < len(text):
-            if text[i] == '(':
-                paren_depth += 1
-            elif text[i] == ')':
-                paren_depth -= 1
-            elif paren_depth == 0 and text[i:i+len(operator)] == operator:
-                return False  # Found operator at top level
-            i += 1
-        return True  # All operators are within parentheses
-    
     def _parse_or_condition(self, condition: str) -> Any:
-        """Parse OR conditions respecting parentheses"""
-        parts = self._split_respecting_parentheses(condition, ' OR ')
-        z3_parts = [self._parse_condition(part.strip()) for part in parts]
+        """Parse OR conditions"""
+        parts = [part.strip() for part in condition.split(' OR ')]
+        z3_parts = [self._parse_condition(part) for part in parts]
         return Or(z3_parts)
     
     def _parse_and_condition(self, condition: str) -> Any:
-        """Parse AND conditions respecting parentheses"""
-        parts = self._split_respecting_parentheses(condition, ' AND ')
-        z3_parts = [self._parse_condition(part.strip()) for part in parts]
+        """Parse AND conditions"""
+        parts = [part.strip() for part in condition.split(' AND ')]
+        z3_parts = [self._parse_condition(part) for part in parts]
         return And(z3_parts)
     
-    def _split_respecting_parentheses(self, text: str, delimiter: str) -> List[str]:
-        """Split text on delimiter while respecting parentheses"""
-        parts = []
-        current_part = ""
-        paren_depth = 0
-        i = 0
-        
-        while i < len(text):
-            if text[i] == '(':
-                paren_depth += 1
-                current_part += text[i]
-            elif text[i] == ')':
-                paren_depth -= 1
-                current_part += text[i]
-            elif paren_depth == 0 and text[i:i+len(delimiter)] == delimiter:
-                # Found delimiter at top level
-                parts.append(current_part)
-                current_part = ""
-                i += len(delimiter) - 1  # Skip the delimiter
-            else:
-                current_part += text[i]
-            i += 1
-        
-        # Add the last part
-        if current_part:
-            parts.append(current_part)
-        
-        return parts
-    
     def _parse_atomic_condition(self, condition: str) -> Any:
-        """Parse atomic conditions like 'x == 5', 'name != "john"', or boolean variables"""
+        """Parse atomic conditions like 'x == 5' or 'name != "john"'"""
         
         # Handle parentheses
         if condition.startswith('(') and condition.endswith(')'):
             return self._parse_condition(condition[1:-1])
-        
-        # Handle NOT operator for boolean variables
-        if condition.strip().upper().startswith('NOT '):
-            inner_condition = condition.strip()[4:].strip()
-            # If it's just a variable name, treat as boolean
-            if inner_condition in self.z3_vars and self.variables[inner_condition].type == 'boolean':
-                return Not(self.z3_vars[inner_condition])
-            else:
-                # Parse the inner condition and negate it
-                return Not(self._parse_atomic_condition(inner_condition))
-        
-        # Handle IN operator for array membership (e.g., "x IN ['a', 'b', 'c']")
-        if ' IN ' in condition:
-            left, right = condition.split(' IN ', 1)
-            left = left.strip()
-            right = right.strip()
-            
-            # Parse the array on the right side
-            if right.startswith('[') and right.endswith(']'):
-                # Extract array elements
-                array_content = right[1:-1].strip()
-                if array_content:
-                    # Split by comma and clean up quotes
-                    elements = []
-                    for elem in array_content.split(','):
-                        elem = elem.strip()
-                        if elem.startswith('"') and elem.endswith('"'):
-                            elements.append(elem[1:-1])
-                        elif elem.startswith("'") and elem.endswith("'"):
-                            elements.append(elem[1:-1])
-                        else:
-                            elements.append(elem)
-                    
-                    # Create Z3 constraint for membership
-                    left_var = self._get_z3_expression(left)
-                    or_conditions = []
-                    for element in elements:
-                        or_conditions.append(left_var == StringVal(element))
-                    
-                    return Or(or_conditions) if len(or_conditions) > 1 else or_conditions[0]
-            
-            raise ValueError(f"Invalid IN syntax: {condition}")
         
         # Comparison operators (order matters - check >= before >)
         operators = ['>=', '<=', '!=', '==', '>', '<']
@@ -279,11 +155,6 @@ class RuleCompiler:
                     return left_var >= right_var
                 elif op == '<=':
                     return left_var <= right_var
-        
-        # Handle standalone boolean variables (e.g., "is_active" means "is_active == true")
-        condition_clean = condition.strip()
-        if condition_clean in self.z3_vars and self.variables[condition_clean].type == 'boolean':
-            return self.z3_vars[condition_clean]
         
         raise ValueError(f"Could not parse atomic condition: {condition}")
     

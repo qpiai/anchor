@@ -19,6 +19,7 @@ class VerificationResult(PyEnum):
     VALID = "valid"
     INVALID = "invalid"
     ERROR = "error"
+    NEEDS_CLARIFICATION = "needs_clarification"
 
 class PolicyDocument(Base):
     __tablename__ = "policy_documents"
@@ -78,7 +79,7 @@ class Verification(Base):
     question = Column(Text, nullable=False)
     answer = Column(Text, nullable=False)
     extracted_variables = Column(JSON)
-    verification_result = Column(Enum(VerificationResult))
+    verification_result = Column(String)  # Temporary: Use String instead of Enum to avoid PostgreSQL enum issues
     explanation = Column(Text)
     suggestions = Column(JSON)
     verified_at = Column(DateTime, default=datetime.utcnow)

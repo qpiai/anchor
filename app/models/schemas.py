@@ -154,4 +154,60 @@ class ErrorDetail(BaseModel):
     details: Optional[Dict[str, Any]] = None
 
 class ErrorResponse(BaseModel):
-    error: ErrorDetail 
+    error: ErrorDetail
+
+# Test Scenario schemas
+class TestScenarioCategory(str, Enum):
+    MISSING_MANDATORY = "missing_mandatory"
+    VALID_SCENARIOS = "valid_scenarios"
+    RULE_VIOLATIONS = "rule_violations"
+    EDGE_CASES = "edge_cases"
+
+class TestScenario(BaseModel):
+    id: str
+    category: TestScenarioCategory
+    name: str
+    question: str
+    answer: str
+    expected_result: VerificationResult
+    expected_missing_variables: Optional[List[str]] = None
+    expected_violated_rule: Optional[str] = None
+    expected_variables: Optional[Dict[str, Any]] = None
+    description: str
+
+class TestScenarioMetadata(BaseModel):
+    total_scenarios: int
+    categories: Dict[TestScenarioCategory, int]
+    generation_time: datetime
+    policy_version: str
+
+class TestScenariosResponse(BaseModel):
+    scenarios: List[TestScenario]
+    metadata: TestScenarioMetadata
+
+class GenerateTestScenariosRequest(BaseModel):
+    max_scenarios_per_category: int = 5
+    include_categories: List[TestScenarioCategory] = [
+        TestScenarioCategory.MISSING_MANDATORY,
+        TestScenarioCategory.VALID_SCENARIOS,
+        TestScenarioCategory.RULE_VIOLATIONS,
+        TestScenarioCategory.EDGE_CASES
+    ]
+
+class TestScenarioResult(BaseModel):
+    scenario_id: str
+    actual_result: VerificationResult
+    passed: bool
+    actual_missing_variables: Optional[List[str]] = None
+    actual_violated_rule: Optional[str] = None
+    explanation: Optional[str] = None
+    error_message: Optional[str] = None
+
+class BulkTestResults(BaseModel):
+    policy_id: uuid.UUID
+    total_scenarios: int
+    passed_scenarios: int
+    failed_scenarios: int
+    success_rate: float
+    results: List[TestScenarioResult]
+    tested_at: datetime 

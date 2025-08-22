@@ -9,9 +9,15 @@ from ..core.database import get_db
 from ..models.database import Policy, PolicyDocument, PolicyStatus
 from ..models.schemas import (
     PolicyResponse, PolicyCreate, PolicyUpdate, PolicyStatusResponse,
-    ErrorResponse
+    ErrorResponse, GenerateTestScenariosRequest, TestScenariosResponse,
+    BulkTestResults, TestScenarioResult, VerificationRequest, VerificationResult
 )
 from pydantic import BaseModel
+
+from ..services.test_scenario_generator import TestScenarioGeneratorService
+from ..services.verification import VerificationService
+from ..services.variable_extractor import VariableExtractorService
+from ..models.database import PolicyCompilation, CompilationStatus
 
 router = APIRouter(prefix="/policies", tags=["policies"])
 
@@ -537,4 +543,156 @@ async def delete_policy_constraint(
     db.commit()
     db.refresh(policy)
     
-    return {"message": "Constraint deleted successfully", "policy": policy} 
+    return {"message": "Constraint deleted successfully", "policy": policy}
+
+# Test Scenario Generation endpoints
+@router.post("/{policy_id}/generate-test-scenarios", response_model=TestScenariosResponse)
+async def generate_test_scenarios(
+    policy_id: uuid.UUID,
+    request: GenerateTestScenariosRequest = GenerateTestScenariosRequest(),
+    db: Session = Depends(get_db)
+):
+    """Generate comprehensive test scenarios for a policy"""
+    
+    policy = db.query(Policy).filter(Policy.id == policy_id).first()
+    
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    
+    if policy.status != PolicyStatus.COMPILED:
+        raise HTTPException(
+            status_code=400, 
+            detail="Policy must be compiled before generating test scenarios"
+        )
+    
+    # Convert policy to dict format for the service
+    policy_dict = {
+        "name": policy.name,
+        "domain": policy.domain,
+        "version": policy.version,
+        "description": policy.description,
+        "variables": policy.variables or [],
+        "rules": policy.rules or [],
+        "constraints": policy.constraints or []
+    }
+    
+    # Initialize service and generate scenarios
+    generator = TestScenarioGeneratorService()
+    scenarios_response = await generator.generate_test_scenarios(policy_dict, request)
+    
+    return scenarios_response
+
+@router.post("/{policy_id}/test-scenarios", response_model=BulkTestResults)
+async def run_test_scenarios(
+    policy_id: uuid.UUID,
+    request: GenerateTestScenariosRequest = GenerateTestScenariosRequest(),
+    db: Session = Depends(get_db)
+):
+    """Generate test scenarios and run them against the verification system"""
+    
+    policy = db.query(Policy).filter(Policy.id == policy_id).first()
+    
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    
+    if policy.status != PolicyStatus.COMPILED:
+        raise HTTPException(
+            status_code=400, 
+            detail="Policy must be compiled before testing"
+        )
+    
+    # Generate scenarios first
+    policy_dict = {
+        "name": policy.name,
+        "domain": policy.domain,
+        "version": policy.version,
+        "description": policy.description,
+        "variables": policy.variables or [],
+        "rules": policy.rules or [],
+        "constraints": policy.constraints or []
+    }
+    
+    generator = TestScenarioGeneratorService()
+    scenarios_response = await generator.generate_test_scenarios(policy_dict, request)
+    
+    # Get the latest compilation for this policy
+    latest_compilation = db.query(PolicyCompilation).filter(
+        PolicyCompilation.policy_id == policy_id,
+        PolicyCompilation.compilation_status == CompilationStatus.SUCCESS
+    ).order_by(PolicyCompilation.compiled_at.desc()).first()
+    
+    if not latest_compilation:
+        raise HTTPException(status_code=400, detail="No successful compilation found for policy")
+    
+    # Initialize services  
+    verification_service = VerificationService()
+    variable_extractor = VariableExtractorService()
+    results = []
+    passed_count = 0
+    
+    for scenario in scenarios_response.scenarios:
+        try:
+            # Extract variables from Q&A pair (following verification.py pattern)
+            extracted_variables = await variable_extractor.extract_variables(
+                scenario.question,
+                scenario.answer, 
+                policy.variables or []
+            )
+            
+            # Run Z3 verification
+            verification_result = verification_service.verify_scenario(
+                extracted_variables,
+                latest_compilation.z3_constraints,
+                policy.rules or []
+            )
+            
+            # Map result to enum
+            if verification_result['result'] == 'valid':
+                actual_result = VerificationResult.VALID
+            elif verification_result['result'] == 'invalid':
+                actual_result = VerificationResult.INVALID
+            elif verification_result['result'] == 'needs_clarification':
+                actual_result = VerificationResult.NEEDS_CLARIFICATION
+            else:
+                actual_result = VerificationResult.ERROR
+            
+            # Check if result matches expectation
+            passed = actual_result == scenario.expected_result
+            if passed:
+                passed_count += 1
+            
+            # Create result record
+            result = TestScenarioResult(
+                scenario_id=scenario.id,
+                actual_result=actual_result,
+                passed=passed,
+                explanation=verification_result['explanation'],
+                error_message=None
+            )
+            
+            results.append(result)
+            
+        except Exception as e:
+            # Handle verification errors
+            result = TestScenarioResult(
+                scenario_id=scenario.id,
+                actual_result=VerificationResult.ERROR,
+                passed=False,
+                explanation=None,
+                error_message=str(e)
+            )
+            results.append(result)
+    
+    # Calculate success rate
+    total_scenarios = len(scenarios_response.scenarios)
+    success_rate = passed_count / total_scenarios if total_scenarios > 0 else 0.0
+    
+    return BulkTestResults(
+        policy_id=policy_id,
+        total_scenarios=total_scenarios,
+        passed_scenarios=passed_count,
+        failed_scenarios=total_scenarios - passed_count,
+        success_rate=success_rate,
+        results=results,
+        tested_at=datetime.now()
+    ) 

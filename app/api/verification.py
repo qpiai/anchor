@@ -95,7 +95,7 @@ async def verify_policy(
             question=request.question,
             answer=request.answer,
             extracted_variables=extracted_variables,
-            verification_result=result_enum.value,  # Use .value to get string value
+            verification_result=result_enum.value,  # Use .value to get the string value
             explanation=verification_result['explanation'],
             suggestions=verification_result['suggestions']
         )
@@ -119,7 +119,7 @@ async def verify_policy(
             question=request.question,
             answer=request.answer,
             extracted_variables={},
-            verification_result=VerificationResult.ERROR,
+            verification_result=VerificationResult.ERROR.value,  # Use .value to get the string value
             explanation=f"Verification failed: {str(e)}",
             suggestions=[]
         )

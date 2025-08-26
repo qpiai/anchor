@@ -22,16 +22,14 @@ class PolicyGeneratorService:
                 )
                 print(f"PolicyGeneratorService: Using custom endpoint - {settings.openai_base_url}")
             else:
-                # Use OpenAI proxy service running on host
-                proxy_url = "http://localhost:8082/v1"
+                # Use direct OpenAI API (no proxy)
                 self.openai_client = openai.AsyncOpenAI(
-                    api_key="proxy-key",  # Dummy key for proxy
-                    base_url=proxy_url,
+                    api_key=settings.openai_api_key,
                     timeout=60.0,
                     max_retries=3
                 )
-                print(f"PolicyGeneratorService: Using OpenAI proxy - {proxy_url}")
-            print(f"PolicyGeneratorService: OpenAI client configured (base_url={settings.openai_base_url or 'proxy'}, model={settings.openai_model})")
+                print("PolicyGeneratorService: Using direct OpenAI API")
+            print(f"PolicyGeneratorService: OpenAI client configured (base_url={settings.openai_base_url or 'direct'}, model={settings.openai_model})")
         
         if settings.anthropic_api_key:
             self.anthropic_client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)

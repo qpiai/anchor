@@ -16,10 +16,10 @@ class CompilationStatus(PyEnum):
     ERROR = "error"
 
 class VerificationResult(PyEnum):
-    VALID = "valid"
-    INVALID = "invalid"
-    ERROR = "error"
-    NEEDS_CLARIFICATION = "needs_clarification"
+    VALID = "VALID"
+    INVALID = "INVALID"
+    ERROR = "ERROR"
+    NEEDS_CLARIFICATION = "NEEDS_CLARIFICATION"
 
 class PolicyDocument(Base):
     __tablename__ = "policy_documents"

@@ -73,14 +73,17 @@ async def verify_policy(
             print(f"Debug: Z3 verification failed: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Z3 verification failed: {str(e)}")
         
-        # Determine result enum
+        # Determine result enum (handle both enum values and legacy string values)
         print(f"Debug: Mapping result '{verification_result['result']}' to enum")
         try:
-            if verification_result['result'] == 'valid':
+            result_value = verification_result['result']
+            if isinstance(result_value, VerificationResult):
+                result_enum = result_value
+            elif result_value == VerificationResult.VALID.value or result_value == 'valid':
                 result_enum = VerificationResult.VALID
-            elif verification_result['result'] == 'invalid':
+            elif result_value == VerificationResult.INVALID.value or result_value == 'invalid':
                 result_enum = VerificationResult.INVALID
-            elif verification_result['result'] == 'needs_clarification':
+            elif result_value == VerificationResult.NEEDS_CLARIFICATION.value or result_value == 'needs_clarification':
                 result_enum = VerificationResult.NEEDS_CLARIFICATION
             else:
                 result_enum = VerificationResult.ERROR
@@ -90,19 +93,24 @@ async def verify_policy(
             raise HTTPException(status_code=500, detail=f"Result enum mapping failed: {str(e)}")
         
         # Store verification in database
-        verification = Verification(
-            policy_id=policy_id,
-            question=request.question,
-            answer=request.answer,
-            extracted_variables=extracted_variables,
-            verification_result=result_enum.value,  # Use .value to get the string value
-            explanation=verification_result['explanation'],
-            suggestions=verification_result['suggestions']
-        )
-        
-        db.add(verification)
-        db.commit()
-        db.refresh(verification)
+        try:
+            verification = Verification(
+                policy_id=policy_id,
+                question=request.question,
+                answer=request.answer,
+                extracted_variables=extracted_variables,
+                verification_result=result_enum.value,  # Use .value to get the string value
+                explanation=verification_result['explanation'],
+                suggestions=verification_result['suggestions']
+            )
+            
+            db.add(verification)
+            db.commit()
+            db.refresh(verification)
+        except Exception as db_error:
+            print(f"Database error: {str(db_error)}")
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"Database error: {str(db_error)}")
         
         return VerificationResponse(
             verification_id=verification.id,
@@ -113,23 +121,28 @@ async def verify_policy(
         )
         
     except Exception as e:
-        # Store failed verification
-        verification = Verification(
-            policy_id=policy_id,
-            question=request.question,
-            answer=request.answer,
-            extracted_variables={},
-            verification_result=VerificationResult.ERROR.value,  # Use .value to get the string value
-            explanation=f"Verification failed: {str(e)}",
-            suggestions=[]
-        )
-        
-        db.add(verification)
-        db.commit()
-        db.refresh(verification)
+        # Store failed verification with rollback handling
+        try:
+            verification = Verification(
+                policy_id=policy_id,
+                question=request.question,
+                answer=request.answer,
+                extracted_variables={},
+                verification_result=VerificationResult.ERROR.value,  # Use .value to get the string value
+                explanation=f"Verification failed: {str(e)}",
+                suggestions=[]
+            )
+            
+            db.add(verification)
+            db.commit()
+            db.refresh(verification)
+        except Exception as db_error:
+            print(f"Database error in exception handler: {str(db_error)}")
+            db.rollback()
+            # Continue with the original error response even if DB logging fails
         
         return VerificationResponse(
-            verification_id=verification.id,
+            verification_id=getattr(verification, 'id', uuid.uuid4()) if 'verification' in locals() else uuid.uuid4(),
             result=VerificationResult.ERROR,
             extracted_variables={},
             explanation=f"Verification failed: {str(e)}",

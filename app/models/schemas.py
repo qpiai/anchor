@@ -14,10 +14,10 @@ class CompilationStatus(str, Enum):
     ERROR = "error"
 
 class VerificationResult(str, Enum):
-    VALID = "valid"
-    INVALID = "invalid"
-    ERROR = "error"
-    NEEDS_CLARIFICATION = "needs_clarification"
+    VALID = "VALID"
+    INVALID = "INVALID"
+    ERROR = "ERROR"
+    NEEDS_CLARIFICATION = "NEEDS_CLARIFICATION"
 
 # Document schemas
 class DocumentUploadResponse(BaseModel):

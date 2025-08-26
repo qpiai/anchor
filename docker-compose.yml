@@ -4,16 +4,11 @@ services:
   backend:
     build: .
     ports:
-      - "9066:8000"
-    
-    environment:
-      - DATABASE_URL=postgresql://reasoning_user:reasoning_pass@db:5432/reasoning_db
-      # - OPENAI_API_KEY=your_openai_api_key_here
-      # - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - DEBUG=true
-      - LOG_LEVEL=INFO
+      - "9066:9066"
+    network_mode: host
+    # Use production environment configuration for Docker
     env_file:
-      - .env
+      - .env.docker
     depends_on:
       db:
         condition: service_healthy

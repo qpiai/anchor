@@ -641,9 +641,9 @@ def show_test_scenarios():
                     max_scenarios = st.slider(
                         "Max scenarios per category", 
                         min_value=1, 
-                        max_value=10, 
-                        value=3,
-                        help="Maximum number of scenarios to generate for each category"
+                        max_value=5, 
+                        value=1,
+                        help="Maximum number of scenarios to generate for each category (set to 1 for demo)"
                     )
                 
                 with col2:
@@ -700,17 +700,21 @@ def show_test_scenarios():
                     st.markdown("### 🧪 Step 3: Test All Scenarios")
                     
                     # Show test button or results
-                    if not st.session_state.test_completed:
-                        st.info("Click the button below to test all generated scenarios against your policy")
+                    if not st.session_state.test_completed and not st.session_state.testing_in_progress:
+                        st.info("✨ Your scenarios are ready! Click below to test them against your policy.")
                         test_scenarios = st.button("🚀 Test All Generated Scenarios", use_container_width=True, type="primary")
                         if test_scenarios:
                             st.session_state.testing_in_progress = True
                             st.rerun()
+                    elif st.session_state.testing_in_progress:
+                        st.info("🔄 Testing in progress... Please wait.")
+                        st.button("⏳ Testing...", disabled=True, use_container_width=True)
                     else:
-                        st.success("✅ Testing completed! See results below.")
+                        st.success("✅ Testing completed! See detailed results below.")
                         if st.button("🔄 Test Again", type="secondary"):
                             st.session_state.test_completed = False
                             st.session_state.test_results = {}
+                            st.session_state.testing_in_progress = False
                             st.rerun()
                 else:
                     st.markdown("### 🧪 Step 2: Test Scenarios")
@@ -734,6 +738,8 @@ def show_test_scenarios():
                                 result = response.json()
                                 st.session_state.generated_scenarios = result
                                 st.session_state.test_results = {}  # Clear previous test results
+                                st.session_state.test_completed = False  # Reset test completion
+                                st.session_state.testing_in_progress = False  # Reset testing flag
                                 
                                 # Show metadata
                                 metadata = result["metadata"]
@@ -744,6 +750,9 @@ def show_test_scenarios():
                                 for i, (category, count) in enumerate(metadata["categories"].items()):
                                     with [col1, col2, col3, col4][i % 4]:
                                         st.metric(category.replace("_", " ").title(), count)
+                                        
+                                # Automatically rerun to show the test button
+                                st.rerun()
                             else:
                                 st.error(f"Failed to generate scenarios: {response.text}")
                                 
@@ -752,58 +761,67 @@ def show_test_scenarios():
                 
                 # Execute testing if flag is set
                 if st.session_state.testing_in_progress and st.session_state.generated_scenarios:
-                    with st.spinner("Testing all scenarios..."):
-                        scenarios = st.session_state.generated_scenarios["scenarios"]
+                    scenarios = st.session_state.generated_scenarios["scenarios"]
+                    
+                    # Show progress container
+                    progress_container = st.container()
+                    with progress_container:
+                        st.info(f"Testing {len(scenarios)} scenarios...")
                         progress_bar = st.progress(0)
                         status_text = st.empty()
+                    
+                    test_results = []
+                    for idx, scenario in enumerate(scenarios):
+                        # Update progress
+                        progress = (idx + 1) / len(scenarios)
+                        progress_bar.progress(progress)
+                        status_text.text(f"Testing scenario {idx + 1}/{len(scenarios)}: {scenario['question'][:50]}...")
                         
-                        test_results = []
-                        for idx, scenario in enumerate(scenarios):
-                            # Update progress
-                            progress = (idx + 1) / len(scenarios)
-                            progress_bar.progress(progress)
-                            status_text.text(f"Testing scenario {idx + 1}/{len(scenarios)}: {scenario['question'][:50]}...")
+                        # Test the scenario
+                        verify_payload = {
+                            "question": scenario["question"],
+                            "answer": scenario["answer"]
+                        }
+                        
+                        try:
+                            response = requests.post(
+                                f"{API_BASE_URL}{API_V1_PREFIX}/policies/{selected_policy_id}/verify",
+                                json=verify_payload,
+                                timeout=30  # Add timeout for better UX
+                            )
                             
-                            # Test the scenario
-                            verify_payload = {
-                                "question": scenario["question"],
-                                "answer": scenario["answer"]
-                            }
-                            
-                            try:
-                                response = requests.post(
-                                    f"{API_BASE_URL}{API_V1_PREFIX}/policies/{selected_policy_id}/verify",
-                                    json=verify_payload
-                                )
+                            if response.status_code == 200:
+                                result = response.json()
+                                actual_result = result.get("result", "error")
+                                expected_result = scenario.get("expected_result", "valid")
+                                passed = actual_result == expected_result
                                 
-                                if response.status_code == 200:
-                                    result = response.json()
-                                    actual_result = result.get("result", "error")
-                                    expected_result = scenario.get("expected_result", "valid")
-                                    passed = actual_result == expected_result
-                                    
-                                    test_result = {
-                                        "scenario_id": scenario["id"],
-                                        "question": scenario["question"],
-                                        "actual_result": actual_result,
-                                        "expected_result": expected_result,
-                                        "passed": passed,
-                                        "explanation": result.get("explanation", "")
-                                    }
-                                    test_results.append(test_result)
-                                    st.session_state.test_results[scenario["id"]] = test_result
-                            except Exception as e:
-                                st.error(f"Error testing scenario: {str(e)}")
-                        
-                        # Mark testing as completed
-                        st.session_state.testing_in_progress = False
-                        st.session_state.test_completed = True
-                        
-                        # Clear progress indicators
-                        progress_bar.empty()
-                        status_text.empty()
-                        
-                        st.rerun()
+                                test_result = {
+                                    "scenario_id": scenario["id"],
+                                    "question": scenario["question"],
+                                    "actual_result": actual_result,
+                                    "expected_result": expected_result,
+                                    "passed": passed,
+                                    "explanation": result.get("explanation", "")
+                                }
+                                test_results.append(test_result)
+                                st.session_state.test_results[scenario["id"]] = test_result
+                            else:
+                                st.error(f"Failed to test scenario {idx+1}: {response.text}")
+                        except requests.Timeout:
+                            st.error(f"Timeout testing scenario {idx+1}")
+                        except Exception as e:
+                            st.error(f"Error testing scenario {idx+1}: {str(e)}")
+                    
+                    # Mark testing as completed
+                    st.session_state.testing_in_progress = False
+                    st.session_state.test_completed = True
+                    
+                    # Clear progress indicators and show completion
+                    progress_container.empty()
+                    st.success(f"✅ Testing completed! {len(test_results)} scenarios tested.")
+                    
+                    st.rerun()
                 
                 # Show test results if completed
                 if st.session_state.test_completed and st.session_state.test_results:

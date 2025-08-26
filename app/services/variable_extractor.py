@@ -20,11 +20,9 @@ class VariableExtractorService:
                     max_retries=3
                 )
             else:
-                # Use OpenAI proxy service running on host
-                proxy_url = "http://localhost:8082/v1"
+                # Use direct OpenAI API (no proxy)
                 self.openai_client = openai.AsyncOpenAI(
-                    api_key="proxy-key",
-                    base_url=proxy_url,
+                    api_key=settings.openai_api_key,
                     timeout=60.0,
                     max_retries=3
                 )

@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Tuple
 from z3 import *
 from .rule_compiler import RuleCompiler
 from .clarifying_questions import ClarifyingQuestionService
+from ..models.schemas import VerificationResult
 
 class VerificationService:
     def __init__(self):
@@ -233,27 +234,27 @@ class VerificationService:
             # Enhanced result determination with rule skipping logic
             if len(effective_variables) == 0:
                 # No effective variables - insufficient information
-                overall_result = "needs_clarification"
+                overall_result = VerificationResult.NEEDS_CLARIFICATION
                 explanation = "❓ Unable to extract sufficient information from the question and answer to evaluate the policy."
                 
                 # Use rule-based clarifying questions for now (LLM integration in API layer)
                 suggestions = self.generate_clarifying_questions(applicable_rules, effective_variables, policy_rules)
             elif len(violated_rules) > 0:
-                overall_result = "invalid"
+                overall_result = VerificationResult.INVALID
                 explanation = self.explain_verification_result(False, failed_rules)
                 suggestions = self.generate_suggestions(failed_rules, effective_variables)
             elif len(supporting_rules) > 0:
-                overall_result = "valid"
+                overall_result = VerificationResult.VALID
                 explanation = self.explain_verification_result(True, [])
                 suggestions = []
             else:
                 # No rules apply - could be due to skipping or insufficient information
                 if len(skipped_rules) > 0:
-                    overall_result = "valid"  # Conservative approach - if no violating rules and some skipped, assume valid
+                    overall_result = VerificationResult.VALID  # Conservative approach - if no violating rules and some skipped, assume valid
                     explanation = f"✅ No policy violations found. {len(skipped_rules)} rule(s) were skipped due to insufficient optional information."
                     suggestions = []
                 else:
-                    overall_result = "needs_clarification"
+                    overall_result = VerificationResult.NEEDS_CLARIFICATION
                     explanation = "❓ Unable to determine validity - no policy rules apply to this scenario based on the available information."
                     suggestions = self.generate_clarifying_questions(applicable_rules, effective_variables, policy_rules)
             
@@ -265,7 +266,7 @@ class VerificationService:
                 explanation += f"\n\n📊 Rule Summary: {active_rules} active, {len(skipped_rules)} skipped, {total_rules - active_rules - len(skipped_rules)} not applicable"
             
             return {
-                'result': overall_result,
+                'result': overall_result.value if isinstance(overall_result, VerificationResult) else overall_result,
                 'rule_results': rule_results,
                 'failed_rules': [rule['id'] for rule in failed_rules],
                 'explanation': explanation,
@@ -274,7 +275,7 @@ class VerificationService:
             
         except Exception as e:
             return {
-                'result': 'error',
+                'result': VerificationResult.ERROR.value,
                 'rule_results': [],
                 'failed_rules': [],
                 'explanation': f"Verification failed: {str(e)}",
@@ -451,7 +452,7 @@ class VerificationService:
             
         except Exception as e:
             return {
-                'result': 'error',
+                'result': VerificationResult.ERROR.value,
                 'rule_results': [],
                 'failed_rules': [],
                 'explanation': f"Compilation or verification failed: {str(e)}",

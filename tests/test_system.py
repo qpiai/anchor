@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test script to verify the automated reasoning backend functionality
+Test script to verify the Anchor functionality
 """
 
 import sys
@@ -203,7 +203,7 @@ def test_z3_installation():
 
 def main():
     """Run all tests"""
-    print("🚀 Starting Automated Reasoning Backend Tests\n")
+    print("🚀 Starting Anchor Tests\n")
     
     tests = [
         ("Z3 Installation", test_z3_installation),

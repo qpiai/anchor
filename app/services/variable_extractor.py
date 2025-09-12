@@ -3,7 +3,7 @@ import asyncio
 from typing import Dict, Any, List
 import openai
 import anthropic
-from ..core.config import settings
+from ..core.config import settings, get_openai_api_params
 
 class VariableExtractorService:
     def __init__(self):
@@ -16,15 +16,15 @@ class VariableExtractorService:
                 self.openai_client = openai.AsyncOpenAI(
                     api_key=settings.openai_api_key,
                     base_url=settings.openai_base_url,
-                    timeout=60.0,
-                    max_retries=3
+                    timeout=120.0,  # Moderate increase for variable extraction
+                    max_retries=2
                 )
             else:
                 # Use direct OpenAI API (no proxy)
                 self.openai_client = openai.AsyncOpenAI(
                     api_key=settings.openai_api_key,
-                    timeout=60.0,
-                    max_retries=3
+                    timeout=120.0,  # Moderate increase for variable extraction
+                    max_retries=2
                 )
         
         if settings.anthropic_api_key:
@@ -64,7 +64,9 @@ class VariableExtractorService:
         5. For enum variables, match to the exact possible_values provided
         6. For boolean variables, interpret yes/no, approval/denial, present/absent
         7. For numeric variables, extract specific numbers mentioned
-        8. If a defined variable cannot be determined from the text, set its value to null
+        8. CRITICAL: If a variable is NOT explicitly mentioned, discussed, or implied in the Q&A, set its value to null
+        9. Do NOT make assumptions or infer values that aren't clearly stated in the Q&A
+        10. When in doubt, use null rather than guessing a default value
 
 
         
@@ -75,12 +77,20 @@ class VariableExtractorService:
         - "wearing safety gear" → safety_gear_worn: true (if safety_gear_worn is defined)
 
         Return a JSON object with ALL defined variables - use null for unknown values.
+        
+        EXAMPLE FOR MINIMAL Q&A:
+        If Q&A says: "Can I submit an expense?" "Yes, for office supplies"
+        Then ONLY extract what's explicitly mentioned:
         {{
-            "defined_variable_1": "extracted_value",
-            "defined_variable_2": 42,
-            "defined_variable_3": null,
-            "defined_variable_4": true
+            "record_type": "expense",
+            "expense_amount": null,
+            "is_monthly_reported": null,
+            "is_reconciled": null,
+            "has_approval": null,
+            "allocation_amount": null
         }}
+        
+        DO NOT assume false/0 values - use null when information is not provided!
         """
         
         try:
@@ -183,25 +193,25 @@ class VariableExtractorService:
                 # Case 1: Successfully extracted (not null)
                 result[var_name] = extracted_value
             
-            elif has_default:
-                # Case 2: Not extracted but has default value
-                default_value = policy_var['default_value']
-                # Convert default based on type
-                if policy_var['type'] == 'boolean':
-                    result[var_name] = str(default_value).lower() == 'true'
-                elif policy_var['type'] == 'number':
-                    result[var_name] = float(default_value) if '.' in str(default_value) else int(default_value)
-                else:
-                    result[var_name] = default_value
-            
             elif is_mandatory:
-                # Case 3: Mandatory variable not extracted and no default
-                # Mark as missing - this will trigger clarifying questions
-                result[var_name] = "MISSING_MANDATORY"
+                # Case 2: Mandatory variable not extracted 
+                if has_default:
+                    # Apply default for mandatory vars
+                    default_value = policy_var['default_value']
+                    if policy_var['type'] == 'boolean':
+                        result[var_name] = str(default_value).lower() == 'true'
+                    elif policy_var['type'] == 'number':
+                        result[var_name] = float(default_value) if '.' in str(default_value) else int(default_value)
+                    else:
+                        result[var_name] = default_value
+                else:
+                    # Mark as missing - this will trigger clarifying questions
+                    result[var_name] = "MISSING_MANDATORY"
             
             else:
-                # Case 4: Optional variable not extracted and no default
-                # Mark for rule skipping
+                # Case 3: Optional variable not extracted
+                # For rule skipping behavior: ignore defaults and mark for rule skipping
+                # This allows rules to be skipped when optional variables are omitted
                 result[var_name] = "SKIP_RULE"
         
         return result
@@ -209,14 +219,14 @@ class VariableExtractorService:
     
     async def _generate_with_openai(self, system_prompt: str, user_prompt: str) -> str:
         """Generate response using OpenAI"""
+        api_params = get_openai_api_params(max_tokens=1000, temperature=0.1)
         response = await self.openai_client.chat.completions.create(
             model=settings.openai_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.1,  # Lower temperature for more consistent extraction
-            max_tokens=1000
+            **api_params
         )
         return response.choices[0].message.content
     
@@ -258,6 +268,9 @@ You can ONLY extract variables that are explicitly defined in the policy variabl
 - Consider context clues that indicate specific variable values
 - Handle casual language and colloquialisms
 - Map business terms to formal variable names
+- Pay attention to implicit information (negations, implications, context)
+- Extract numerical values from various formats ($1M, $1,000,000, "one million dollars")
+- Recognize boolean indicators ("with/without", "has/lacks", "approved/rejected")
 
 ### 3. Type Handling
 - **Numbers**: Extract numeric values for number-type variables
@@ -270,9 +283,11 @@ You can ONLY extract variables that are explicitly defined in the policy variabl
 ### 4. Common Patterns
 - **Time expressions**: "next week", "in 3 days", "two weeks notice"
 - **Quantities**: "5 days", "more than 10", "at least 2 weeks"
+- **Monetary values**: "$500K", "$1.5M", "$2 million", "five hundred thousand"
 - **Approvals**: "manager approved", "got permission", "authorized by"
 - **Types/Categories**: Match text to enum categories
-- **Employment types**: "full-time" typically means 40+ hours/week, "part-time" typically means <40 hours/week
+- **Negations**: "no conflict", "without approval", "lacks documentation"
+- **Implications**: Context that suggests unstated values
 
 ### 5. Default Values and Assumptions
 When certain variables are not explicitly mentioned but can be reasonably inferred:

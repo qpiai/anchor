@@ -1,4 +1,4 @@
-# Automated Reasoning System
+# Anchor
 
 AI-powered policy verification system that converts documents into formal Z3 logic for automated compliance checking.
 
@@ -28,7 +28,7 @@ cd automated_reasoning_check
 # Create .env file
 cat > .env << EOF
 OPENAI_API_KEY=your_key_here
-DATABASE_URL=postgresql://admin:admin@localhost:5556/reasoning_engine
+DATABASE_URL=postgresql://reasoning_user:reasoning_pass@localhost:5432/reasoning_db
 EOF
 
 # Start services

@@ -10,15 +10,15 @@ API_BASE_URL = "http://localhost:9066"
 API_V1_PREFIX = "/api/v1"
 
 st.set_page_config(
-    page_title="Automated Reasoning Backend - Test UI",
-    page_icon="🧠",
+    page_title="Anchor - Test UI",
+    page_icon="⚓",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 def main():
-    st.title("🧠 Automated Reasoning Backend")
-    st.markdown("**Multi-agent AI system for policy verification and automated reasoning**")
+    st.title("⚓ Anchor")
+    st.markdown("**Multi-agent AI system for policy verification**")
     
     # Sidebar navigation
     st.sidebar.title("Navigation")
@@ -270,7 +270,7 @@ def show_compilation():
     st.header("Policy Compilation")
     
     st.markdown("""
-    Convert policies to formal Z3 logic constraints for mathematical verification.
+    Convert policies to Z3 logic constraints for verification.
     Only compiled policies can be used for verification.
     """)
     
@@ -302,7 +302,7 @@ def show_verification():
     
     st.markdown("""
     Test questions and answers against compiled policies to verify compliance.
-    The system will extract variables and perform formal verification.
+    The system will extract variables and perform verification.
     """)
     
     # Policy selection
@@ -534,10 +534,12 @@ def verify_qa(policy_id: str, question: str, answer: str):
                 result = response.json()
                 
                 # Show result
-                if result['result'] == 'valid':
+                if result['result'] == 'VALID':
                     st.success("✅ VALID - The scenario complies with the policy")
-                elif result['result'] == 'invalid':
+                elif result['result'] == 'INVALID':
                     st.error("❌ INVALID - The scenario violates the policy")
+                elif result['result'] == 'NEEDS_CLARIFICATION':
+                    st.info("❓ NEEDS CLARIFICATION - Additional information required")
                 else:
                     st.warning("⚠️ ERROR - Verification failed")
                 

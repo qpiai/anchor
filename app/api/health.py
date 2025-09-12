@@ -89,7 +89,7 @@ async def root():
     return {
         "name": settings.app_name,
         "version": "1.0.0",
-        "description": "Automated Reasoning Backend Service - Multi-agent AI system for policy verification",
+        "description": "Anchor - Multi-agent AI system for policy verification",
         "docs_url": "/docs",
         "health_url": "/health",
         "api_prefix": settings.api_v1_prefix

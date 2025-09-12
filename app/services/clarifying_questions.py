@@ -2,7 +2,7 @@ import json
 from typing import Dict, Any, List
 import openai
 import anthropic
-from ..core.config import settings
+from ..core.config import settings, get_openai_api_params
 
 class ClarifyingQuestionService:
     def __init__(self):
@@ -14,15 +14,15 @@ class ClarifyingQuestionService:
                 self.openai_client = openai.AsyncOpenAI(
                     api_key=settings.openai_api_key,
                     base_url=settings.openai_base_url,
-                    timeout=60.0,
-                    max_retries=3
+                    timeout=120.0,  # Moderate increase for clarifying questions
+                    max_retries=2
                 )
             else:
                 # Use direct OpenAI API (no proxy)
                 self.openai_client = openai.AsyncOpenAI(
                     api_key=settings.openai_api_key,
-                    timeout=60.0,
-                    max_retries=3
+                    timeout=120.0,  # Moderate increase for clarifying questions
+                    max_retries=2
                 )
         
         if settings.anthropic_api_key:
@@ -220,14 +220,14 @@ Focus on extracting accurate values based on all the information provided. Use t
     
     async def _generate_with_openai(self, system_prompt: str, user_prompt: str) -> str:
         """Generate response using OpenAI"""
+        api_params = get_openai_api_params(max_tokens=1000, temperature=0.3)
         response = await self.openai_client.chat.completions.create(
             model=settings.openai_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.3,
-            max_tokens=1000
+            **api_params
         )
         return response.choices[0].message.content
     

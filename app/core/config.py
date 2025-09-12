@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     anthropic_api_key: Optional[str] = os.getenv("ANTHROPIC_API_KEY")
     
     # App Settings
-    app_name: str = "Automated Reasoning Backend"
+    app_name: str = "Anchor"
     debug: bool = os.getenv("DEBUG", "False").lower() == "true"
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     
@@ -33,4 +33,26 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
 
-settings = Settings() 
+settings = Settings()
+
+def get_openai_api_params(max_tokens: int = None, temperature: float = 0.3) -> dict:
+    """
+    Returns the correct API parameters for OpenAI calls based on the model.
+    GPT-5 models use reasoning_effort instead of max_tokens and temperature.
+    """
+    model = settings.openai_model.lower()
+    
+    # GPT-5 series models that use reasoning_effort parameter
+    gpt5_models = ['gpt-5']
+    
+    if any(gpt5_model in model for gpt5_model in gpt5_models):
+        # GPT-5 uses reasoning_effort instead of max_tokens and temperature
+        return {
+            "reasoning_effort": "low"
+        }
+    else:
+        # Standard GPT-4 and other models
+        return {
+            "max_tokens": max_tokens,
+            "temperature": temperature
+        } 

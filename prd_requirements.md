@@ -1,14 +1,14 @@
-# Product Requirements Document: Automated Reasoning Backend
+# Product Requirements Document: Anchor
 
 ## 1. Project Overview
 
-**Product Name:** Automated Reasoning Backend Service  
+**Product Name:** Anchor Service  
 **Version:** 1.0  
 **Type:** REST API Backend Service  
-**Purpose:** Multi-agent AI system for autonomous policy generation, formal verification, and automated reasoning checks
+**Purpose:** Multi-agent AI system for autonomous policy generation and verification
 
 ### Core Innovation
-Build a backend service that implements AWS Bedrock Guardrails-style automated reasoning but with autonomous policy generation capabilities. The system uses multiple LLM agents to generate domain-specific policies from documents, compiles them to formal Z3 constraints, and provides mathematically verified validation of user queries.
+Build a backend service that implements AWS Bedrock Guardrails-style policy verification but with autonomous policy generation capabilities. The system uses multiple LLM agents to generate domain-specific policies from documents, compiles them to Z3 constraints, and provides verified validation of user queries.
 
 ## 2. System Architecture
 

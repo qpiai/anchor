@@ -1,2 +1,2 @@
-# Automated Reasoning Backend
+# Anchor
 __version__ = "1.0.0" 

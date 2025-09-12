@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    logger.info("Starting Automated Reasoning Backend...")
+    logger.info("Starting Anchor...")
     
     # Create database tables
     create_tables()
@@ -28,14 +28,13 @@ async def lifespan(app: FastAPI):
     yield
     
     # Shutdown
-    logger.info("Shutting down Automated Reasoning Backend...")
+    logger.info("Shutting down Anchor...")
 
 # Create FastAPI application
 app = FastAPI(
-    title="Automated Reasoning Backend",
+    title="Anchor",
     description="""
-    Multi-agent AI system for autonomous policy generation, formal verification, 
-    and automated reasoning checks.
+    Multi-agent AI system for autonomous policy generation and verification.
     
     ## Features
     - **Document Upload**: Upload policy documents (PDF, DOCX, TXT)

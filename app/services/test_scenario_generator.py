@@ -22,7 +22,7 @@ from ..models.schemas import (
     TestScenariosResponse, GenerateTestScenariosRequest,
     VerificationResult
 )
-from ..core.config import settings
+from ..core.config import settings, get_openai_api_params
 from openai import AsyncOpenAI
 
 class TestScenarioGeneratorService:
@@ -30,7 +30,9 @@ class TestScenarioGeneratorService:
     def __init__(self):
         self.client = AsyncOpenAI(
             api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url
+            base_url=settings.openai_base_url,
+            timeout=180.0,  # Increased timeout for GPT-5 reasoning
+            max_retries=2
         )
     
     async def generate_test_scenarios(
@@ -187,13 +189,16 @@ class TestScenarioGeneratorService:
         ]
         
         if optional_no_defaults and len(scenarios) < max_scenarios:
+            # Create scenario that omits optional variables to test rule skipping
+            # Only include mandatory variables, skip optional ones so their rules are skipped
             scenario = await self._generate_natural_scenario(
                 policy,
                 TestScenarioCategory.EDGE_CASES,
-                "Optional without defaults - rule skipping",
+                "Rule skipping - optional variables omitted",
                 include_mandatory=True,
+                missing_variables=[var['name'] for var in optional_no_defaults[:5]],  # Explicitly skip these
                 expected_result=VerificationResult.VALID,
-                description="Tests rule skipping for optional variables without defaults"
+                description=f"Tests rule skipping when optional variables are omitted: {[v['name'] for v in optional_no_defaults[:5]]}"
             )
             scenarios.append(scenario)
         
@@ -251,7 +256,27 @@ class TestScenarioGeneratorService:
                 expected_variables[var['name']] = self._generate_realistic_value(var)
         
         if missing_variables:
-            var_instructions += f"DO NOT include these variables: {missing_variables}\n"
+            var_instructions += f"DO NOT mention or include these variables AT ALL (they should be completely absent): {missing_variables}\n"
+            var_instructions += """
+CRITICAL: This scenario tests RULE SKIPPING behavior - NOT rule violations:
+
+RULE SKIPPING vs RULE VIOLATION:
+- RULE SKIPPING (VALID): Person provides minimal information, doesn't mention optional fields at all
+  Example: "I need to submit a basic expense request for $200 for office supplies"
+  (No mention of monthly reporting, reconciliation, etc. - these rules are skipped)
+
+- RULE VIOLATION (INVALID): Person explicitly states they violated a requirement
+  Example: "I didn't do monthly reporting for my $200 expense" 
+  (This violates the monthly reporting rule)
+
+FOR THIS SCENARIO:
+- Generate a person who provides ONLY mandatory information
+- They should NOT mention the optional variables at all (not even to say they don't have them)
+- This is a minimal, basic request - like someone just getting started or doing something simple
+- The person is being legitimate but providing minimal details
+- Rules depending on the omitted variables will be SKIPPED (not violated)
+- Result should be VALID because no rules are actually broken
+"""
         
         # Create LLM prompt
         prompt = f"""
@@ -268,6 +293,27 @@ Requirements:
 - Question should be what a user would ask
 - Answer should contain the information naturally
 
+CRITICAL FOR RULE SKIPPING EDGE CASES:
+If testing rule skipping, create a scenario where someone makes a MINIMAL but LEGITIMATE request:
+
+WHAT TO GENERATE:
+1. Person provides only mandatory information - nothing more
+2. They do NOT mention optional variables AT ALL (not even to say they lack them)
+3. Create a basic, simple business scenario (new employee, simple request, basic case)
+4. Answer should be SHORT and contain only mandatory details
+
+WHAT NOT TO GENERATE:
+- Don't have person say "I don't have X" or "I didn't do Y" 
+- Don't create scenarios where person violates requirements
+- Don't make it seem like an oversight or error
+
+EXAMPLES OF GOOD RULE SKIPPING SCENARIOS:
+- "Can I submit an expense?" "Yes, I have a $100 receipt for office supplies"
+- "Can I request access?" "I need access to the customer database for my role"
+- "Can I take time off?" "I want to take 3 days vacation next month"
+
+These are minimal requests where optional details simply aren't mentioned.
+
 Return JSON format:
 {{
     "question": "natural question",
@@ -276,15 +322,15 @@ Return JSON format:
 """
         
         try:
+            api_params = get_openai_api_params(max_tokens=400, temperature=0.7)
             response = await self.client.chat.completions.create(
                 model=settings.openai_model,
                 messages=[
                     {"role": "system", "content": "You are a JSON generator. Return only valid JSON without any markdown formatting or additional text."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.7,
-                max_tokens=400,
-                response_format={"type": "json_object"}
+                response_format={"type": "json_object"},
+                **api_params
             )
             
             # Clean response content and parse JSON

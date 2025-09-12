@@ -3,7 +3,7 @@ import asyncio
 from typing import Dict, Any, List
 import openai
 import anthropic
-from ..core.config import settings
+from ..core.config import settings, get_openai_api_params
 
 class PolicyGeneratorService:
     def __init__(self):
@@ -17,16 +17,16 @@ class PolicyGeneratorService:
                 self.openai_client = openai.AsyncOpenAI(
                     api_key=settings.openai_api_key,
                     base_url=settings.openai_base_url,
-                    timeout=60.0,
-                    max_retries=3
+                    timeout=180.0,
+                    max_retries=2
                 )
                 print(f"PolicyGeneratorService: Using custom endpoint - {settings.openai_base_url}")
             else:
                 # Use direct OpenAI API (no proxy)
                 self.openai_client = openai.AsyncOpenAI(
                     api_key=settings.openai_api_key,
-                    timeout=60.0,
-                    max_retries=3
+                    timeout=180.0,
+                    max_retries=2
                 )
                 print("PolicyGeneratorService: Using direct OpenAI API")
             print(f"PolicyGeneratorService: OpenAI client configured (base_url={settings.openai_base_url or 'direct'}, model={settings.openai_model})")
@@ -56,6 +56,7 @@ class PolicyGeneratorService:
         7. NUMBERS WITHOUT QUOTES: tenure_months >= 12
         8. CONCLUSIONS must be simple text descriptions, NOT variable assignments
         9. Use "valid" or "invalid" as conclusions for rule enforcement
+        10. ❌ MANDATORY VARIABLES MUST NOT HAVE DEFAULT VALUES - this defeats clarification logic
         
         REQUIRED JSON SCHEMA:
         {{
@@ -69,8 +70,7 @@ class PolicyGeneratorService:
               "type": "string|number|boolean|enum",
               "description": "description",
               "possible_values": ["val1", "val2"],
-              "is_mandatory": true,
-              "default_value": "optional_default"
+              "is_mandatory": true
             }}
           ],
           "rules": [
@@ -227,14 +227,14 @@ class PolicyGeneratorService:
     async def _generate_with_openai(self, system_prompt: str, user_prompt: str) -> str:
         """Generate response using OpenAI"""
         print(f"PolicyGeneratorService: calling OpenAI (base_url={settings.openai_base_url}, model={settings.openai_model})")
+        api_params = get_openai_api_params(max_tokens=4000, temperature=0.3)
         response = await self.openai_client.chat.completions.create(
             model=settings.openai_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.3,
-            max_tokens=4000
+            **api_params
         )
         return response.choices[0].message.content
     
@@ -352,9 +352,11 @@ class PolicyGeneratorService:
     
     ## Mandatory vs Optional Variables
     - **is_mandatory: true** - Required for policy evaluation (e.g., employee_id, request_amount)
+      ❌ **NEVER give default_value to mandatory variables** - defeats the purpose of being mandatory
+      ✅ **Mandatory variables without defaults trigger NEEDS_CLARIFICATION** when missing
     - **is_mandatory: false** - Optional variables that may not always be available
-    - **default_value** - Used when optional variables cannot be extracted from text
-    - **No default_value** - Rules using this optional variable will be skipped if unknown
+      ✅ **default_value** - Used when optional variables cannot be extracted from text
+      ✅ **No default_value** - Rules using this optional variable will be skipped if unknown
 
     ## Rule Writing Patterns
 

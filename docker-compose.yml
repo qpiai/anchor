@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   backend:
-    build: .
+    image: anchor-backend
     ports:
       - "9066:9066"
     network_mode: host

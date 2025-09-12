@@ -25,11 +25,9 @@ This system automatically generates policies from documents, compiles them to fo
 git clone <repository>
 cd automated_reasoning_check
 
-# Create .env file
-cat > .env << EOF
-OPENAI_API_KEY=your_key_here
-DATABASE_URL=postgresql://reasoning_user:reasoning_pass@localhost:5432/reasoning_db
-EOF
+# Create .env file from template
+cp .env.example .env
+# Edit .env and add your OpenAI API key
 
 # Start services
 docker-compose up -d
@@ -168,6 +166,17 @@ Interactive API documentation: `http://localhost:9066/docs`
 - `POST /api/v1/policies/{id}/compile` - Compile policy to Z3
 - `POST /api/v1/policies/{id}/verify` - Verify scenarios
 
+## Security
+
+**⚠️ Important Security Notes:**
+- **Never commit API keys or secrets** to version control
+- **Use environment variables** for all sensitive configuration
+- **Copy `.env.example` to `.env`** and configure your secrets there
+- **Keep dependencies updated** to get security patches
+- **Use strong database passwords** in production environments
+
+See [SECURITY.md](SECURITY.md) for detailed security guidelines.
+
 ## Troubleshooting
 
 **Common Issues:**
@@ -180,6 +189,14 @@ Interactive API documentation: `http://localhost:9066/docs`
 docker-compose logs        # All services
 docker-compose logs app    # Application only
 ```
+
+## Contributing
+
+We welcome contributions! Please see [CHANGELOG.md](CHANGELOG.md) for version history.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ---
 

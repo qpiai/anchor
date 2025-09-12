@@ -1,6 +1,8 @@
-# Anchor
-
-AI-powered policy verification system that converts documents into formal Z3 logic for automated compliance checking.
+<div align="center">
+  <img src="image.png" alt="Anchor Logo" width="200"/>
+  <h1>Anchor</h1>
+  <p><em>AI-powered policy verification system that converts documents into formal Z3 logic for automated compliance checking.</em></p>
+</div>
 
 ## Overview
 

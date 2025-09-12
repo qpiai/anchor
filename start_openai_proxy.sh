@@ -1,6 +1,16 @@
 #!/bin/bash
 echo "🚀 Starting OpenAI Proxy Service..."
-export OPENAI_API_KEY="your_openai_api_key_here"
+# Load environment variables from .env file
+if [ -f .env ]; then
+    export $(grep -v '^#' .env | xargs)
+fi
+
+# Check if OPENAI_API_KEY is set
+if [ -z "$OPENAI_API_KEY" ]; then
+    echo "❌ ERROR: OPENAI_API_KEY environment variable not set!"
+    echo "Please set it in your .env file or export it in your shell"
+    exit 1
+fi
 
 # Test OpenAI connection first
 echo "🔍 Testing OpenAI connection..."

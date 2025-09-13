@@ -2,7 +2,10 @@ version: '3.8'
 
 services:
   backend:
+    # Option 1: Use locally built image
     image: anchor-backend
+    # Option 2: Use published Docker Hub image (uncomment below and comment above)
+    # image: ishantkohar/anchor-backend
     ports:
       - "9066:9066"
     network_mode: host

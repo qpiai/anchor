@@ -23,6 +23,8 @@ This system automatically generates policies from documents, compiles them to fo
 - OpenAI API key
 
 ### Run with Docker
+
+**Option 1: Using Published Docker Image (Recommended)**
 ```bash
 git clone <repository>
 cd automated_reasoning_check
@@ -30,6 +32,29 @@ cd automated_reasoning_check
 # Create .env file from template
 cp .env.example .env
 # Edit .env and add your OpenAI API key
+
+# Use published Docker image - edit docker-compose.yml:
+# Uncomment: image: ishantkohar/anchor-backend
+# Comment: image: anchor-backend
+
+# Start services
+docker-compose up -d
+
+# API: http://localhost:9066/docs
+# UI: streamlit run streamlit_ui/app.py
+```
+
+**Option 2: Build Locally**
+```bash
+git clone <repository>
+cd automated_reasoning_check
+
+# Create .env file from template
+cp .env.example .env
+# Edit .env and add your OpenAI API key
+
+# Build local image (ensure docker-compose.yml uses: image: anchor-backend)
+docker build --network=host -t anchor-backend .
 
 # Start services
 docker-compose up -d

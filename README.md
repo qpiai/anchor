@@ -41,7 +41,11 @@ cp .env.example .env
 docker-compose up -d
 
 # API: http://localhost:9066/docs
-# UI: streamlit run streamlit_ui/app.py
+# UI: Create test env and run streamlit
+python -m venv test_env
+source test_env/bin/activate
+pip install streamlit
+streamlit run streamlit_ui/app.py
 ```
 
 **Option 2: Build Locally**
@@ -60,7 +64,11 @@ docker build --network=host -t anchor-backend .
 docker-compose up -d
 
 # API: http://localhost:9066/docs
-# UI: streamlit run streamlit_ui/app.py
+# UI: Create test env and run streamlit
+python -m venv test_env
+source test_env/bin/activate
+pip install streamlit
+streamlit run streamlit_ui/app.py
 ```
 
 ### Local Development

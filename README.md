@@ -37,6 +37,9 @@ cp .env.example .env
 # Uncomment: image: ishantkohar/anchor-backend
 # Comment: image: anchor-backend
 
+# Fix upload permissions
+chmod 777 uploads
+
 # Start services
 docker-compose up -d
 
@@ -44,7 +47,7 @@ docker-compose up -d
 # UI: Create test env and run streamlit
 python -m venv test_env
 source test_env/bin/activate
-pip install streamlit
+pip install -r requirements.txt
 streamlit run streamlit_ui/app.py
 ```
 
@@ -57,8 +60,13 @@ cd automated_reasoning_check
 cp .env.example .env
 # Edit .env and add your OpenAI API key
 
+# For GPT-5 users: Edit app/core/config.py and change reasoning_effort from "low" to "high" for better results
+
 # Build local image (ensure docker-compose.yml uses: image: anchor-backend)
 docker build --network=host -t anchor-backend .
+
+# Fix upload permissions
+chmod 777 uploads
 
 # Start services
 docker-compose up -d
@@ -175,20 +183,100 @@ automated_reasoning_check/
 
 ## Example Policies
 
-Successfully tested with real-world policies:
-- **HR Leave of Absence Policy**: Employee eligibility, duration limits, approval workflows
-- **Equipment Usage Policy**: Safety requirements, authorization, time restrictions
+Transform your policy documents into intelligent, verifiable systems. The system takes PDF documents from the `data/` folder and generates structured policies with formal validation logic.
 
-Both demonstrate comprehensive mandatory variable handling and complex rule validation.
+### Input Examples
+- **`data/hr_policy.pdf`**: Employee leave policies, vacation rules, approval workflows
+- **`data/operations_policy.pdf`**: Equipment usage, safety protocols, authorization requirements
+- **`data/legal_policy.pdf`**: Compliance rules, regulatory requirements, audit procedures
 
-## Test Results
+### Generated Policy Structure
+Each input document becomes a structured policy containing:
+- **Variables**: Mandatory/optional fields (employee_type, requested_days, etc.)
+- **Rules**: Formal Z3 logic conditions (`employee_type == "full_time" AND requested_days <= 10`)
+- **Validation Logic**: Automatic compliance checking with detailed explanations
+- **Examples**: Test scenarios with expected outcomes
 
-**100% Success Rate** across all edge cases:
-- ✅ Valid requests with all mandatory variables → `valid`
-- ✅ Missing mandatory variable detection → `needs_clarification`
-- ✅ Policy violations → `invalid` with detailed explanations
-- ✅ Default value usage for optional variables
-- ✅ Complex rule interactions and nested conditions
+### Policy Output Example
+```json
+{
+  "policy_name": "Employee Vacation Policy",
+  "variables": [
+    {
+      "name": "employee_type",
+      "type": "enum",
+      "possible_values": ["full_time", "part_time"],
+      "is_mandatory": true
+    }
+  ],
+  "rules": [
+    {
+      "condition": "employee_type == 'full_time' AND requested_days <= 15",
+      "conclusion": "valid",
+      "description": "Full-time employees can take up to 15 days vacation"
+    }
+  ]
+}
+```
+
+*Screenshots and detailed examples coming soon - placeholder for visual demonstrations of the policy generation process.*
+
+## Key Features & Capabilities
+
+**Comprehensive Policy Validation System:**
+- ✅ **Complete Variable Validation**: Handles all mandatory variables → returns `valid`
+- ✅ **Smart Clarification Requests**: Detects missing mandatory variables → requests `needs_clarification`
+- ✅ **Detailed Violation Explanations**: Identifies policy violations → returns `invalid` with specific reasons
+- ✅ **Intelligent Default Handling**: Automatically applies default values for optional variables
+- ✅ **Complex Rule Processing**: Supports nested conditions and multi-variable rule interactions
+
+## Input/Output Flow Examples
+
+### Example 1: Valid Request
+**Input Query:**
+```
+Question: "Can a full-time employee take 10 days vacation with 3 weeks notice?"
+Answer: "Yes, the employee is full-time and provided adequate notice."
+```
+
+**System Output:**
+```json
+{
+  "result": "valid",
+  "explanation": "✅ All policy rules are satisfied. The scenario is valid according to the policy."
+}
+```
+
+### Example 2: Missing Information
+**Input Query:**
+```
+Question: "Can I take some vacation time?"
+Answer: "I need time off for personal reasons."
+```
+
+**System Output:**
+```json
+{
+  "result": "needs_clarification",
+  "explanation": "❓ Missing required information for: employee_type, requested_days",
+  "suggestions": ["What is your employment type (full-time/part-time)?", "How many days are you requesting?"]
+}
+```
+
+### Example 3: Policy Violation
+**Input Query:**
+```
+Question: "Can I take 20 days vacation tomorrow?"
+Answer: "I need immediate time off."
+```
+
+**System Output:**
+```json
+{
+  "result": "invalid",
+  "explanation": "❌ The scenario violates the following policy rules:\n\n• advance_notice_rule: Regular vacation needs 2+ weeks advance notice\n• duration_limit_rule: Maximum 15 consecutive days allowed"
+}
+```
 
 ## API Documentation
 
@@ -218,6 +306,7 @@ See [SECURITY.md](SECURITY.md) for detailed security guidelines.
 - Database connection → Check PostgreSQL container: `docker-compose logs postgres`
 - Missing API key → Set `OPENAI_API_KEY` in `.env`
 - Z3 installation → Verify: `python -c "import z3"`
+- Upload directory not writable → Fix permissions: `chmod 777 uploads/` or restart containers after creating uploads directory
 
 **Logs:**
 ```bash

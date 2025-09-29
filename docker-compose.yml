@@ -50,6 +50,35 @@ services:
       retries: 5
       
 
+  mcp-server:
+    image: ishantkohar/anchor-backend
+    # build:
+    #   context: .
+    #   network: host
+    ports:
+      - "8787:8787"
+    network_mode: host
+    # Override the default command to run MCP server
+    command: python run_mcp_server.py --transport sse --host 0.0.0.0 --port 8787
+    # Use same environment configuration
+    env_file:
+      - .env.docker
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./uploads:/app/uploads  # Shared uploads directory
+    # Enable connection to host services
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8787/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
   adminer:
     image: adminer
     restart: unless-stopped

@@ -3,8 +3,11 @@
 Test script to verify the Anchor functionality
 """
 
-import sys
 import os
+import sys
+
+import yaml
+
 sys.path.append(os.path.join(os.path.dirname(__file__), 'app'))
 
 from app.services.rule_compiler import RuleCompiler
@@ -55,18 +58,15 @@ constraints:
     
     try:
         compiler = RuleCompiler()
-        compiled_policy = compiler.compile_policy(policy_yaml)
+        compiled_policy = compiler.compile_policy(yaml.safe_load(policy_yaml))
         
         print("✅ Policy compiled successfully!")
         print(f"   Variables: {len(compiled_policy['variables'])}")
         print(f"   Rules: {len(compiled_policy['rules'])}")
         print(f"   Constraints: {len(compiled_policy['constraints'])}")
         
-        return True
-        
     except Exception as e:
-        print(f"❌ Rule compilation failed: {e}")
-        return False
+        raise AssertionError(f"Rule compilation failed: {e}") from e
 
 def test_verification():
     """Test the verification service"""
@@ -101,6 +101,14 @@ rules:
     condition: "vacation_duration_days > 5 AND NOT has_manager_approval"
     conclusion: "invalid"
     description: "Long vacations need manager approval"
+  - id: "regular_ok"
+    condition: "request_type == 'regular_vacation' AND advance_notice_days >= 14 AND vacation_duration_days <= 5"
+    conclusion: "valid"
+    description: "Short regular vacation with enough notice is valid"
+  - id: "emergency_exception_rule"
+    condition: "request_type == 'emergency_leave'"
+    conclusion: "valid"
+    description: "Emergency leave bypasses normal rules"
 
 constraints:
   - "advance_notice_days >= 0"
@@ -157,23 +165,19 @@ constraints:
         
         for scenario in test_scenarios:
             result = verification_service.compile_and_verify(
-                policy_yaml, 
+                yaml.safe_load(policy_yaml),
                 "Test question",
-                "Test answer", 
+                "Test answer",
                 scenario['variables']
             )
-            
-            if result['result'] == scenario['expected']:
-                print(f"✅ {scenario['name']}: {result['result']} (expected {scenario['expected']})")
-            else:
-                print(f"❌ {scenario['name']}: {result['result']} (expected {scenario['expected']})")
-                all_passed = False
-        
-        return all_passed
-        
+            assert str(result['result']).lower() == scenario['expected'].lower(), (
+                f"{scenario['name']}: {result['result']} (expected {scenario['expected']}) "
+                f"{result.get('explanation')}"
+            )
+            print(f"✅ {scenario['name']}: {result['result']}")
+
     except Exception as e:
-        print(f"❌ Verification testing failed: {e}")
-        return False
+        raise AssertionError(f"Verification testing failed: {e}") from e
 
 def test_z3_installation():
     """Test if Z3 is properly installed"""
@@ -187,19 +191,13 @@ def test_z3_installation():
         x = IntVal(5)
         solver.add(x == 5)
         
-        if solver.check().r == 1:  # SAT
-            print("✅ Z3 solver is working correctly!")
-            return True
-        else:
-            print("❌ Z3 solver returned unexpected result")
-            return False
+        assert solver.check().r == 1
+        print("✅ Z3 solver is working correctly!")
             
-    except ImportError:
-        print("❌ Z3 is not installed. Run: pip install z3-solver")
-        return False
+    except ImportError as e:
+        raise AssertionError("Z3 is not installed") from e
     except Exception as e:
-        print(f"❌ Z3 test failed: {e}")
-        return False
+        raise AssertionError(f"Z3 test failed: {e}") from e
 
 def main():
     """Run all tests"""

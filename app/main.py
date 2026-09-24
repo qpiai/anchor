@@ -1,11 +1,12 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import logging
 
 from .core.config import settings
 from .core.database import create_tables
-from .api import documents, policies, compilation, verification, health
+from .api import clarifying_questions, compilation, documents, grounding, health, policies, policy_validation, verification
 
 # Configure logging
 logging.basicConfig(level=getattr(logging, settings.log_level))
@@ -74,6 +75,9 @@ app.include_router(documents.router, prefix=settings.api_v1_prefix)
 app.include_router(policies.router, prefix=settings.api_v1_prefix)
 app.include_router(compilation.router, prefix=settings.api_v1_prefix)
 app.include_router(verification.router, prefix=settings.api_v1_prefix)
+app.include_router(clarifying_questions.router, prefix=settings.api_v1_prefix)
+app.include_router(policy_validation.router, prefix=settings.api_v1_prefix)
+app.include_router(grounding.router, prefix=settings.api_v1_prefix)
 
 # Global exception handler
 @app.exception_handler(Exception)
@@ -81,22 +85,15 @@ async def global_exception_handler(request, exc):
     logger.error(f"Global exception handler caught: {exc}")
     
     if settings.debug:
-        # In debug mode, return detailed error information
         import traceback
-        return HTTPException(
-            status_code=500,
-            detail={
-                "error": str(exc),
-                "type": type(exc).__name__,
-                "traceback": traceback.format_exc()
-            }
-        )
+        content = {
+            "error": str(exc),
+            "type": type(exc).__name__,
+            "traceback": traceback.format_exc(),
+        }
     else:
-        # In production, return generic error message
-        return HTTPException(
-            status_code=500,
-            detail="Internal server error"
-        )
+        content = {"detail": "Internal server error"}
+    return JSONResponse(status_code=500, content=content)
 
 # Health check at root level
 @app.get("/ping")

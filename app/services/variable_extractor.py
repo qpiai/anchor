@@ -31,7 +31,16 @@ class VariableExtractorService:
             self.anthropic_client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
     
     async def extract_variables(self, question: str, answer: str, policy_variables: List[Dict]) -> Dict[str, Any]:
-        """Extract variable values from natural language Q&A pairs"""
+        """Extract variable values, then apply defaults and missing markers."""
+        raw = await self.extract_raw(question, answer, policy_variables)
+        extracted_variables = self._apply_default_values(raw, policy_variables)
+        validation_errors = await self.validate_extracted_variables(extracted_variables, policy_variables)
+        if validation_errors:
+            print(f"Variable extraction warnings: {validation_errors}")
+        return extracted_variables
+
+    async def extract_raw(self, question: str, answer: str, policy_variables: List[Dict]) -> Dict[str, Any]:
+        """What the model read, before defaults: null means the model did not find the fact."""
         
         system_prompt = self._get_variable_extractor_prompt()
         
@@ -101,8 +110,6 @@ class VariableExtractorService:
             else:
                 raise Exception("No LLM provider configured")
             
-            # Log the raw response for debugging
-            print(f"Raw LLM response: {repr(response)}")
             
             if not response or not response.strip():
                 raise Exception("LLM returned empty response")
@@ -119,19 +126,9 @@ class VariableExtractorService:
             else:
                 json_text = response_text
             
-            # Parse the JSON response
-            extracted_variables = json.loads(json_text)
-            
-            # Apply default values for missing but inferable variables
-            extracted_variables = self._apply_default_values(extracted_variables, policy_variables)
-            
-            # Validate extracted variables
-            validation_errors = await self.validate_extracted_variables(extracted_variables, policy_variables)
-            if validation_errors:
-                # Log warnings but don't fail - return best effort extraction
-                print(f"Variable extraction warnings: {validation_errors}")
-            
-            return extracted_variables
+            parsed = json.loads(json_text)
+            names = [var['name'] for var in policy_variables]
+            return {name: parsed.get(name) for name in names}
             
         except json.JSONDecodeError as e:
             print(f"Failed to parse JSON from response: {repr(response)}")
@@ -179,6 +176,15 @@ class VariableExtractorService:
     
     def _apply_default_values(self, extracted_variables: Dict[str, Any], policy_variables: List[Dict]) -> Dict[str, Any]:
         """Return ALL policy variables with comprehensive state handling"""
+
+        def _typed_default(policy_var: Dict) -> Any:
+            default_value = policy_var['default_value']
+            if policy_var['type'] == 'boolean':
+                return str(default_value).lower() == 'true'
+            if policy_var['type'] == 'number':
+                return float(default_value) if '.' in str(default_value) else int(default_value)
+            return default_value
+
         result = {}
         
         # Go through every defined policy variable
@@ -194,32 +200,30 @@ class VariableExtractorService:
                 result[var_name] = extracted_value
             
             elif is_mandatory:
-                # Case 2: Mandatory variable not extracted 
+                # Case 2: Mandatory variable not extracted
                 if has_default:
-                    # Apply default for mandatory vars
-                    default_value = policy_var['default_value']
-                    if policy_var['type'] == 'boolean':
-                        result[var_name] = str(default_value).lower() == 'true'
-                    elif policy_var['type'] == 'number':
-                        result[var_name] = float(default_value) if '.' in str(default_value) else int(default_value)
-                    else:
-                        result[var_name] = default_value
+                    result[var_name] = _typed_default(policy_var)
                 else:
                     # Mark as missing - this will trigger clarifying questions
                     result[var_name] = "MISSING_MANDATORY"
-            
+
             else:
-                # Case 3: Optional variable not extracted
-                # For rule skipping behavior: ignore defaults and mark for rule skipping
-                # This allows rules to be skipped when optional variables are omitted
-                result[var_name] = "SKIP_RULE"
+                # Case 3: Optional variable not extracted.
+                # A default is used (same conversion as mandatory). With no
+                # default the variable stays unknown and dependent rules skip.
+                if has_default:
+                    result[var_name] = _typed_default(policy_var)
+                else:
+                    result[var_name] = "SKIP_RULE"
         
         return result
     
     
     async def _generate_with_openai(self, system_prompt: str, user_prompt: str) -> str:
         """Generate response using OpenAI"""
-        api_params = get_openai_api_params(max_tokens=1000, temperature=0.1)
+        api_params = get_openai_api_params(
+            max_tokens=1000, temperature=0.1, effort=settings.extraction_reasoning_effort
+        )
         response = await self.openai_client.chat.completions.create(
             model=settings.openai_model,
             messages=[
@@ -287,13 +291,11 @@ You can ONLY extract variables that are explicitly defined in the policy variabl
 - **Approvals**: "manager approved", "got permission", "authorized by"
 - **Types/Categories**: Match text to enum categories
 - **Negations**: "no conflict", "without approval", "lacks documentation"
-- **Implications**: Context that suggests unstated values
 
-### 5. Default Values and Assumptions
-When certain variables are not explicitly mentioned but can be reasonably inferred:
-- **full_time employees**: Assume hours_per_week = 40 unless stated otherwise
-- **part_time employees**: Assume hours_per_week = 20 unless stated otherwise
-- **contractor employees**: Assume hours_per_week = 30 unless stated otherwise
+### 5. Never Invent Facts
+- Never assume a value the text does not state or directly entail (no "full-time means 40 hours").
+- A value you compute must come only from stated numbers (8 hours a day, 5 days a week = 40).
+- If a fact is unstated, hedged, or claimed by someone without the authority to grant it, use null.
 
 ## Output Format
 Return only valid JSON with extracted variables:

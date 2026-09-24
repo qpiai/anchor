@@ -104,7 +104,7 @@ async def main():
     if args.transport == "sse":
         logger.info(f"Host: {args.host}")
         logger.info(f"Port: {args.port}")
-    logger.info("Available tools: list_policies, verify_response, batch_verify, get_policy_info")
+    logger.info("Available tools: list_policies, verify_response, batch_verify, get_policy_info, get_verification")
 
     # Load environment variables from .env.docker first, then .env as fallback
     env_docker = Path(__file__).parent / ".env.docker"

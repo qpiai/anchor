@@ -11,6 +11,7 @@ class PolicyVariable:
     possible_values: List[str] = None
     is_mandatory: bool = True
     default_value: str = None
+    trusted_only: bool = False
 
 @dataclass
 class PolicyRule:
@@ -28,6 +29,9 @@ class RuleCompiler:
         
     def compile_policy(self, policy_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Main entry point - converts policy dictionary to Z3 constraints"""
+        self.variables = {}
+        self.z3_vars = {}
+        self.constraints = []
         policy = policy_dict
         
         # Step 1: Create Z3 variables
@@ -69,7 +73,9 @@ class RuleCompiler:
             if var['type'] == 'string':
                 self.z3_vars[var['name']] = String(var['name'])
             elif var['type'] == 'number':
-                self.z3_vars[var['name']] = Int(var['name'])
+                # Reals so fractional inputs (0.5 hours) compare correctly.
+                # Integer inputs still bind with RealVal.
+                self.z3_vars[var['name']] = Real(var['name'])
             elif var['type'] == 'boolean':
                 self.z3_vars[var['name']] = Bool(var['name'])
             elif var['type'] == 'date':
@@ -262,9 +268,11 @@ class RuleCompiler:
                 left = left.strip()
                 right = right.strip()
                 
-                # Get Z3 variables
+                # Get Z3 variables. Integer literals become Reals when
+                # compared with a number variable so the sorts match.
                 left_var = self._get_z3_expression(left)
                 right_var = self._get_z3_expression(right)
+                left_var, right_var = self._align_numeric_sorts(left_var, right_var)
                 
                 # Return appropriate Z3 constraint
                 if op == '==':
@@ -286,6 +294,14 @@ class RuleCompiler:
             return self.z3_vars[condition_clean]
         
         raise ValueError(f"Could not parse atomic condition: {condition}")
+
+    def _align_numeric_sorts(self, left: Any, right: Any) -> tuple:
+        """Promote an integer literal when the other side is a Real."""
+        if is_real(left) and is_int_value(right):
+            return left, RealVal(right.as_long())
+        if is_real(right) and is_int_value(left):
+            return RealVal(left.as_long()), right
+        return left, right
     
     def _get_z3_expression(self, expr: str) -> Any:
         """Convert expression to Z3 variable or constant"""

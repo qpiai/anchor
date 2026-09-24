@@ -1,15 +1,12 @@
-version: '3.8'
-
 services:
   backend:
-    # Option 1: Build locally from Dockerfile (uncomment below and comment image line)
-    # build: .
-    # Option 2: Use published Docker Hub image (recommended)
-    image: ishantkohar/anchor-backend
+    build: .
+    image: anchor-backend
     ports:
       - "9066:9066"
     network_mode: host
-    # Use production environment configuration for Docker
+    # Use production environment configuration for Docker.
+    # TypeSafe/Jev settings (TYPESAFE_API_KEY, VARIABLE_EXTRACTOR, JEV_*) come from .env.docker.
     env_file:
       - .env.docker
     depends_on:
@@ -17,12 +14,12 @@ services:
         condition: service_healthy
     volumes:
       - ./uploads:/app/uploads
-    # Enable connection to host services (OpenAI proxy)
+    # Reach services on the host, such as a local Postgres
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/ping"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9066/ping')"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -51,10 +48,7 @@ services:
       
 
   mcp-server:
-    image: ishantkohar/anchor-backend
-    # build:
-    #   context: .
-    #   network: host
+    image: anchor-backend
     ports:
       - "8787:8787"
     network_mode: host
@@ -73,7 +67,7 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8787/"]
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 8787), 2)"]
       interval: 30s
       timeout: 10s
       retries: 3

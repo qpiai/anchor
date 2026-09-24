@@ -5,9 +5,10 @@ import asyncio
 
 from ..core.database import get_db
 from ..core.config import settings
+from ..models.database import PolicyCompilation, CompilationStatus
 from ..models.schemas import HealthResponse
+from ..services.extraction import extractor_public_status
 from ..services.policy_generator import PolicyGeneratorService
-from ..services.variable_extractor import VariableExtractorService
 
 router = APIRouter(tags=["health"])
 
@@ -138,7 +139,7 @@ async def system_status(db: Session = Depends(get_db)):
         stats["compilations"] = {
             "total": db.query(PolicyCompilation).count(),
             "successful": db.query(PolicyCompilation).filter(
-                PolicyCompilation.compilation_status == "success"
+                PolicyCompilation.compilation_status == CompilationStatus.SUCCESS
             ).count()
         }
         
@@ -161,7 +162,8 @@ async def system_status(db: Session = Depends(get_db)):
             "status": "operational",
             "statistics": stats,
             "uptime": "N/A",  # Could implement actual uptime tracking
-            "version": "1.0.0"
+            "version": "1.0.0",
+            **extractor_public_status(),
         }
         
     except Exception as e:
@@ -180,5 +182,6 @@ async def get_configuration():
         "openai_configured": bool(settings.openai_api_key),
         "anthropic_configured": bool(settings.anthropic_api_key),
         "supported_file_types": [".pdf", ".docx", ".doc", ".txt"],
-        "api_version": "1.0.0"
+        "api_version": "1.0.0",
+        **extractor_public_status(),
     } 

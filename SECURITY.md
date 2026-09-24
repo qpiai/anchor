@@ -2,21 +2,23 @@
 
 ## Reporting Vulnerabilities
 
-If you discover a vulnerability in this library, please report it by opening a GitHub issue.
-
-For sensitive security issues, please contact the maintainers directly instead of opening a public issue.
+Please report vulnerabilities privately through GitHub: open the repository's **Security** tab and choose **Report a vulnerability**. Do not open a public issue for a security problem.
 
 ## Supported Versions
 
-| Version | Supported |
-|---------|-----------|
-| 1.0.x   | ✅        |
+Only the latest release on `main` receives fixes.
+
+## Deployment Notes
+
+- The API has no built-in authentication and allows any CORS origin. Run it on a private network or behind an authenticating proxy; do not expose it to the internet as is.
+- Text in a request can claim anything, including approvals. For decisions that matter, pass facts from a system of record in `facts`, and mark those variables `trusted_only` (see the README).
+- Keep `JEV_INJECTION_HOLDS_APPROVAL` and `HYBRID_FAIL_CLOSED` on unless you have a reason to trade safety for availability.
 
 ## Security Measures
 
 - **No secrets in repository**: All API keys and sensitive configuration are handled via environment variables
 - **Environment-based configuration**: Use `.env` files for local development, never commit them
-- **Input validation**: All API endpoints validate and sanitize user inputs
+- **Input validation**: Request bodies are validated with Pydantic schemas
 - **Database security**: Parameterized queries prevent SQL injection
 - **Dependencies**: Regular dependency updates to address known vulnerabilities
 - **Container security**: Non-root user in Docker containers

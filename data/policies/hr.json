@@ -1,0 +1,188 @@
+{
+  "name": "leave_of_absence_policy",
+  "description": "Defines eligibility, duration limits, application method, and paid leave benefits for leaves of absence.",
+  "domain": "hr",
+  "version": "1.0",
+  "variables": [
+    {
+      "name": "employment_status",
+      "type": "enum",
+      "description": "The requester's employment designation.",
+      "possible_values": [
+        "full_time",
+        "part_time",
+        "contractor"
+      ],
+      "is_mandatory": true
+    },
+    {
+      "name": "hours_per_week",
+      "type": "number",
+      "description": "The requester's working hours per week. Full-time eligibility requires more than 20 hours per week.",
+      "is_mandatory": true
+    },
+    {
+      "name": "consecutive_calendar_days",
+      "type": "number",
+      "description": "The number of consecutive calendar days requested for this leave.",
+      "is_mandatory": true
+    },
+    {
+      "name": "has_manager_approval",
+      "type": "boolean",
+      "description": "Whether a manager approved an extension beyond 30 consecutive calendar days. This is relevant only when the request exceeds 30 days.",
+      "is_mandatory": false
+    },
+    {
+      "name": "submission_method",
+      "type": "enum",
+      "description": "The method used to submit the leave request.",
+      "possible_values": [
+        "email",
+        "onsite",
+        "verbal",
+        "other"
+      ],
+      "is_mandatory": false
+    },
+    {
+      "name": "recipient_department",
+      "type": "string",
+      "description": "The department to which the leave request was submitted.",
+      "possible_values": [
+        "HR"
+      ],
+      "is_mandatory": false
+    },
+    {
+      "name": "is_paid_leave",
+      "type": "boolean",
+      "description": "Whether the requester is asking for the leave to be paid.",
+      "is_mandatory": false
+    }
+  ],
+  "rules": [
+    {
+      "id": "eligible_full_time_employees",
+      "description": "Employees designated full-time and working more than 20 hours per week qualify to request leave.",
+      "condition": "employment_status == \"full_time\" AND hours_per_week > 20",
+      "conclusion": "valid",
+      "priority": 1
+    },
+    {
+      "id": "ineligible_part_time_employees",
+      "description": "Part-time employees working 20 hours per week or fewer are ineligible for leave.",
+      "condition": "employment_status == \"part_time\" AND hours_per_week <= 20",
+      "conclusion": "invalid",
+      "priority": 2
+    },
+    {
+      "id": "ineligible_contractors",
+      "description": "Contractors are ineligible for leave.",
+      "condition": "employment_status == \"contractor\"",
+      "conclusion": "invalid",
+      "priority": 3
+    },
+    {
+      "id": "maximum_duration_without_approval",
+      "description": "A leave request exceeding 30 consecutive calendar days is not allowed without manager approval.",
+      "condition": "consecutive_calendar_days > 30 AND has_manager_approval != true",
+      "conclusion": "invalid",
+      "priority": 4
+    },
+    {
+      "id": "email_submission_required",
+      "description": "A leave request must be submitted by email.",
+      "condition": "submission_method != \"email\"",
+      "conclusion": "invalid",
+      "priority": 5
+    },
+    {
+      "id": "hr_recipient_required",
+      "description": "A leave request must be submitted to the HR department.",
+      "condition": "recipient_department != \"HR\"",
+      "conclusion": "invalid",
+      "priority": 6
+    },
+    {
+      "id": "paid_leave_for_eligible_full_time_employees",
+      "description": "Paid leave is available only to employees designated full-time and working more than 20 hours per week.",
+      "condition": "is_paid_leave == true AND employment_status == \"full_time\" AND hours_per_week > 20",
+      "conclusion": "valid",
+      "priority": 7
+    },
+    {
+      "id": "paid_leave_unavailable_to_part_time_employees",
+      "description": "Part-time employees are not eligible for paid leave.",
+      "condition": "is_paid_leave == true AND employment_status == \"part_time\"",
+      "conclusion": "invalid",
+      "priority": 8
+    },
+    {
+      "id": "paid_leave_unavailable_to_contractors",
+      "description": "Contractors are not eligible for paid leave.",
+      "condition": "is_paid_leave == true AND employment_status == \"contractor\"",
+      "conclusion": "invalid",
+      "priority": 9
+    }
+  ],
+  "constraints": [
+    "hours_per_week >= 0",
+    "consecutive_calendar_days > 0"
+  ],
+  "examples": [
+    {
+      "question": "Can I request 10 consecutive calendar days of leave?",
+      "variables": {
+        "employment_status": "full_time",
+        "hours_per_week": 40,
+        "consecutive_calendar_days": 10,
+        "submission_method": "email",
+        "recipient_department": "HR",
+        "is_paid_leave": false
+      },
+      "expected_result": "valid",
+      "explanation": "The requester is full-time, works more than 20 hours per week, is within the 30-day limit, and submits the request by email to HR."
+    },
+    {
+      "question": "Can I request 35 consecutive calendar days of leave without manager approval?",
+      "variables": {
+        "employment_status": "full_time",
+        "hours_per_week": 40,
+        "consecutive_calendar_days": 35,
+        "has_manager_approval": false,
+        "submission_method": "email",
+        "recipient_department": "HR",
+        "is_paid_leave": false
+      },
+      "expected_result": "invalid",
+      "explanation": "The request exceeds 30 consecutive calendar days and does not have manager approval."
+    },
+    {
+      "question": "Can a contractor request paid leave?",
+      "variables": {
+        "employment_status": "contractor",
+        "hours_per_week": 40,
+        "consecutive_calendar_days": 5,
+        "submission_method": "email",
+        "recipient_department": "HR",
+        "is_paid_leave": true
+      },
+      "expected_result": "invalid",
+      "explanation": "Contractors are ineligible for leave and are not eligible for paid leave."
+    },
+    {
+      "question": "Can I submit my leave request verbally at the office?",
+      "variables": {
+        "employment_status": "full_time",
+        "hours_per_week": 40,
+        "consecutive_calendar_days": 5,
+        "submission_method": "verbal",
+        "recipient_department": "HR",
+        "is_paid_leave": false
+      },
+      "expected_result": "invalid",
+      "explanation": "Leave requests must be submitted by email; verbal requests are not acceptable."
+    }
+  ]
+}

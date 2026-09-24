@@ -1,0 +1,311 @@
+{
+  "name": "equipment_usage_and_maintenance",
+  "description": "Sets eligibility, permitted use, checkout, safety, maintenance, reporting, and duration requirements for company equipment.",
+  "domain": "operations",
+  "version": "1.0",
+  "variables": [
+    {
+      "name": "employee_type",
+      "type": "enum",
+      "description": "Employment category of the person requesting equipment use.",
+      "possible_values": [
+        "full_time",
+        "contractor",
+        "intern",
+        "part_time"
+      ],
+      "is_mandatory": true
+    },
+    {
+      "name": "equipment_type",
+      "type": "enum",
+      "description": "Type of company equipment being used; machinery use triggers the safety-gear requirement.",
+      "possible_values": [
+        "machinery",
+        "vehicle",
+        "laptop",
+        "other"
+      ],
+      "is_mandatory": true
+    },
+    {
+      "name": "use_purpose",
+      "type": "enum",
+      "description": "Whether the equipment is being used for official business or personal purposes.",
+      "possible_values": [
+        "official_business",
+        "personal"
+      ],
+      "is_mandatory": true
+    },
+    {
+      "name": "consecutive_use_hours",
+      "type": "number",
+      "description": "Number of consecutive hours the equipment will be used.",
+      "is_mandatory": true
+    },
+    {
+      "name": "has_operations_manager_prior_authorization",
+      "type": "boolean",
+      "description": "Whether a contractor received prior authorization from the Operations Manager.",
+      "is_mandatory": false
+    },
+    {
+      "name": "has_explicit_approval",
+      "type": "boolean",
+      "description": "Whether an intern or part-time employee was explicitly granted approval to use equipment.",
+      "is_mandatory": false
+    },
+    {
+      "name": "is_logged_out_in_operations_portal",
+      "type": "boolean",
+      "description": "Whether the equipment was logged out through the Operations Portal before use.",
+      "is_mandatory": false
+    },
+    {
+      "name": "safety_check_completed_before_use",
+      "type": "boolean",
+      "description": "Whether the equipment underwent a safety check before this use.",
+      "is_mandatory": false
+    },
+    {
+      "name": "fault_or_damage_exists",
+      "type": "boolean",
+      "description": "Whether any fault or damage exists on the equipment.",
+      "is_mandatory": false,
+      "default_value": "false"
+    },
+    {
+      "name": "hours_since_fault_or_damage_identified",
+      "type": "number",
+      "description": "Hours elapsed since the fault or damage was identified.",
+      "is_mandatory": false
+    },
+    {
+      "name": "fault_or_damage_reported_to_operations",
+      "type": "boolean",
+      "description": "Whether the fault or damage was reported to the Operations Department.",
+      "is_mandatory": false
+    },
+    {
+      "name": "repair_performed",
+      "type": "boolean",
+      "description": "Whether repair or maintenance work was performed on the equipment.",
+      "is_mandatory": false,
+      "default_value": "false"
+    },
+    {
+      "name": "repair_performed_by_operations_approved_vendor",
+      "type": "boolean",
+      "description": "Whether the repair or maintenance was performed by a vendor approved by Operations.",
+      "is_mandatory": false
+    },
+    {
+      "name": "has_manager_approval_for_extended_use",
+      "type": "boolean",
+      "description": "Whether a manager approved use exceeding 8 consecutive hours.",
+      "is_mandatory": false
+    },
+    {
+      "name": "is_overnight_use",
+      "type": "boolean",
+      "description": "Whether the equipment use will continue overnight.",
+      "is_mandatory": false,
+      "default_value": "false"
+    },
+    {
+      "name": "has_written_operations_manager_overnight_approval",
+      "type": "boolean",
+      "description": "Whether written approval for overnight use was provided by the Operations Manager.",
+      "is_mandatory": false
+    },
+    {
+      "name": "required_safety_gear_worn",
+      "type": "boolean",
+      "description": "Whether the required safety gear, such as helmets or gloves, is worn when using company machinery.",
+      "is_mandatory": false
+    },
+    {
+      "name": "safety_rules_compliant",
+      "type": "boolean",
+      "description": "Whether the user complies with applicable safety rules during equipment use.",
+      "is_mandatory": false,
+      "default_value": "true"
+    }
+  ],
+  "rules": [
+    {
+      "id": "eligible_full_time_employee",
+      "description": "Full-time employees qualify to use company equipment, subject to the policy's other requirements.",
+      "condition": "employee_type == \"full_time\"",
+      "conclusion": "valid",
+      "priority": 1
+    },
+    {
+      "id": "eligible_authorized_contractor",
+      "description": "Contractors qualify to use company equipment when they have prior Operations Manager authorization.",
+      "condition": "employee_type == \"contractor\" AND has_operations_manager_prior_authorization == true",
+      "conclusion": "valid",
+      "priority": 2
+    },
+    {
+      "id": "eligible_approved_intern",
+      "description": "Interns qualify to use company equipment when explicitly granted approval.",
+      "condition": "employee_type == \"intern\" AND has_explicit_approval == true",
+      "conclusion": "valid",
+      "priority": 3
+    },
+    {
+      "id": "eligible_approved_part_time_employee",
+      "description": "Part-time employees qualify to use company equipment when explicitly granted approval.",
+      "condition": "employee_type == \"part_time\" AND has_explicit_approval == true",
+      "conclusion": "valid",
+      "priority": 4
+    },
+    {
+      "id": "contractor_missing_prior_authorization",
+      "description": "Contractor equipment use without prior Operations Manager authorization is prohibited.",
+      "condition": "employee_type == \"contractor\" AND has_operations_manager_prior_authorization != true",
+      "conclusion": "invalid",
+      "priority": 5
+    },
+    {
+      "id": "intern_missing_explicit_approval",
+      "description": "Intern equipment use without explicit approval is prohibited.",
+      "condition": "employee_type == \"intern\" AND has_explicit_approval != true",
+      "conclusion": "invalid",
+      "priority": 6
+    },
+    {
+      "id": "part_time_missing_explicit_approval",
+      "description": "Part-time employee equipment use without explicit approval is prohibited.",
+      "condition": "employee_type == \"part_time\" AND has_explicit_approval != true",
+      "conclusion": "invalid",
+      "priority": 7
+    },
+    {
+      "id": "personal_use_prohibited",
+      "description": "Company equipment must not be used for personal purposes.",
+      "condition": "use_purpose == \"personal\"",
+      "conclusion": "invalid",
+      "priority": 8
+    },
+    {
+      "id": "equipment_must_be_logged_out",
+      "description": "Equipment use without first logging it out through the Operations Portal is prohibited.",
+      "condition": "is_logged_out_in_operations_portal != true",
+      "conclusion": "invalid",
+      "priority": 9
+    },
+    {
+      "id": "pre_use_safety_check_required",
+      "description": "Equipment use without a safety check before use is prohibited.",
+      "condition": "safety_check_completed_before_use != true",
+      "conclusion": "invalid",
+      "priority": 10
+    },
+    {
+      "id": "fault_or_damage_must_be_reported_within_24_hours",
+      "description": "A fault or damage must be reported to the Operations Department within 24 hours of identification.",
+      "condition": "fault_or_damage_exists == true AND hours_since_fault_or_damage_identified > 24 AND fault_or_damage_reported_to_operations != true",
+      "conclusion": "invalid",
+      "priority": 11
+    },
+    {
+      "id": "repairs_must_use_operations_approved_vendor",
+      "description": "Repairs or maintenance performed by a vendor not approved by Operations are prohibited.",
+      "condition": "repair_performed == true AND repair_performed_by_operations_approved_vendor != true",
+      "conclusion": "invalid",
+      "priority": 12
+    },
+    {
+      "id": "extended_use_requires_manager_approval",
+      "description": "Use exceeding 8 consecutive hours requires manager approval.",
+      "condition": "consecutive_use_hours > 8 AND has_manager_approval_for_extended_use != true",
+      "conclusion": "invalid",
+      "priority": 13
+    },
+    {
+      "id": "overnight_use_requires_written_operations_manager_approval",
+      "description": "Overnight equipment use requires written approval from the Operations Manager.",
+      "condition": "is_overnight_use == true AND has_written_operations_manager_overnight_approval != true",
+      "conclusion": "invalid",
+      "priority": 14
+    },
+    {
+      "id": "machinery_requires_safety_gear",
+      "description": "Required safety gear must be worn when using company machinery.",
+      "condition": "equipment_type == \"machinery\" AND required_safety_gear_worn != true",
+      "conclusion": "invalid",
+      "priority": 15
+    },
+    {
+      "id": "safety_rules_must_be_followed",
+      "description": "Failure to comply with applicable safety rules results in suspension of equipment access and makes the use noncompliant.",
+      "condition": "safety_rules_compliant == false",
+      "conclusion": "invalid",
+      "priority": 16
+    }
+  ],
+  "constraints": [
+    "consecutive_use_hours > 0"
+  ],
+  "examples": [
+    {
+      "question": "Can a full-time employee use a company laptop for official business for 4 hours after logging it out and completing a safety check?",
+      "variables": {
+        "employee_type": "full_time",
+        "equipment_type": "laptop",
+        "use_purpose": "official_business",
+        "consecutive_use_hours": 4,
+        "is_logged_out_in_operations_portal": true,
+        "safety_check_completed_before_use": true
+      },
+      "expected_result": "valid",
+      "explanation": "The full-time employee has a standalone eligibility basis, the use is for official business, and the stated checkout and safety requirements are met."
+    },
+    {
+      "question": "Can a contractor use company machinery for official business without prior Operations Manager authorization?",
+      "variables": {
+        "employee_type": "contractor",
+        "equipment_type": "machinery",
+        "use_purpose": "official_business",
+        "consecutive_use_hours": 3,
+        "has_operations_manager_prior_authorization": false,
+        "is_logged_out_in_operations_portal": true,
+        "safety_check_completed_before_use": true,
+        "required_safety_gear_worn": true
+      },
+      "expected_result": "invalid",
+      "explanation": "Contractors require prior authorization from the Operations Manager."
+    },
+    {
+      "question": "Can an approved intern use equipment for personal purposes?",
+      "variables": {
+        "employee_type": "intern",
+        "equipment_type": "laptop",
+        "use_purpose": "personal",
+        "consecutive_use_hours": 2,
+        "has_explicit_approval": true,
+        "is_logged_out_in_operations_portal": true,
+        "safety_check_completed_before_use": true
+      },
+      "expected_result": "invalid",
+      "explanation": "Explicit approval does not permit personal use of company equipment."
+    },
+    {
+      "question": "Can a full-time employee use a vehicle for 10 consecutive hours without manager approval?",
+      "variables": {
+        "employee_type": "full_time",
+        "equipment_type": "vehicle",
+        "use_purpose": "official_business",
+        "consecutive_use_hours": 10,
+        "has_manager_approval_for_extended_use": false,
+        "is_logged_out_in_operations_portal": true,
+        "safety_check_completed_before_use": true
+      },
+      "expected_result": "invalid",
+      "explanation": "Use exceeding 8 consecutive hours requires manager approval."
+    }
+  ]
+}

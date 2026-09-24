@@ -10,6 +10,8 @@ The MCP server provides a standardized interface for AI assistants to:
 - Perform batch verification of multiple scenarios
 - Get detailed policy information
 
+Verification uses the same extractor as the API (`VARIABLE_EXTRACTOR`: `auto`, `jev`, or `llm`). `auto` uses Jev when `TYPESAFE_API_KEY` is set and otherwise the LLM extractor. If a Jev call errors or times out and `JEV_LLM_FALLBACK=true`, the MCP tools fall back to the LLM extractor for that request. When fallback is false, the tool returns an error and does not call GPT. Z3 still makes the decision. Compilations are JSON and are recompiled in process; pickled blobs are never loaded.
+
 ## Installation
 
 1. **Install Dependencies**
@@ -49,7 +51,7 @@ docker-compose up -d mcp-server
 **Note:** If you don't need the MCP server functionality, you can comment out the `mcp-server` service in `docker-compose.yml` to save resources.
 
 The Docker Compose MCP server:
-- Uses the same Docker image as the main backend (`ishantkohar/anchor-backend`)
+- Uses the same Docker image as the main backend (`anchor-backend`, built by `docker compose build`)
 - Runs on port 8787 with SSE transport for HTTP-based access
 - Shares the same database and environment configuration (`.env.docker`)
 - Automatically restarts unless stopped
@@ -227,7 +229,7 @@ Verifies a single question-answer pair against a policy.
 {
   "success": true,
   "result": "valid",
-  "explanation": "✅ All policy rules are satisfied. The scenario is valid according to the policy.",
+  "explanation": "All policy rules are satisfied. The scenario is valid according to the policy.",
   "extracted_variables": {
     "employee_type": "full_time",
     "requested_days": 10

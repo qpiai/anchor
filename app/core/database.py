@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from typing import Generator
@@ -27,4 +27,25 @@ def get_db() -> Generator[Session, None, None]:
 
 # Function to create all tables
 def create_tables():
-    Base.metadata.create_all(bind=engine) 
+    Base.metadata.create_all(bind=engine)
+    _ensure_verification_details_column()
+    _ensure_policy_validation_errors_column()
+
+
+def _ensure_verification_details_column():
+    """create_all does not add columns to tables that already exist."""
+    if engine.dialect.name != "postgresql":
+        return
+    with engine.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE verifications ADD COLUMN IF NOT EXISTS details JSON"
+        ))
+
+
+def _ensure_policy_validation_errors_column():
+    if engine.dialect.name != "postgresql":
+        return
+    with engine.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE policies ADD COLUMN IF NOT EXISTS validation_errors JSON"
+        ))

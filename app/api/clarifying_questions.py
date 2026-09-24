@@ -5,17 +5,17 @@ import uuid
 from pydantic import BaseModel
 
 from ..core.database import get_db
-from ..models.database import Policy, PolicyCompilation
+from ..models.database import Policy, PolicyCompilation, CompilationStatus
 from ..models.schemas import VerificationRequest
 from ..services.clarifying_questions import ClarifyingQuestionService
-from ..services.variable_extractor import VariableExtractorService
+from ..services.compiled_store import policy_dict_from_row
+from ..services.extraction import get_variable_extractor
 from ..services.verification import VerificationService
 
 router = APIRouter(prefix="/policies", tags=["clarifying_questions"])
 
 # Initialize services
 clarifying_service = ClarifyingQuestionService()
-variable_extractor = VariableExtractorService()
 verification_service = VerificationService()
 
 class ClarifyingQuestionsRequest(BaseModel):
@@ -41,7 +41,7 @@ async def get_clarifying_questions(
     
     try:
         # First try to extract variables from the original Q&A
-        extracted_variables = await variable_extractor.extract_variables(
+        extracted_variables = await get_variable_extractor().extract_variables(
             request.question,
             request.answer,
             policy.variables or []
@@ -109,7 +109,7 @@ async def verify_with_clarifying_responses(
     latest_compilation = (
         db.query(PolicyCompilation)
         .filter(PolicyCompilation.policy_id == policy_id)
-        .filter(PolicyCompilation.compilation_status == "success")
+        .filter(PolicyCompilation.compilation_status == CompilationStatus.SUCCESS)
         .order_by(PolicyCompilation.compiled_at.desc())
         .first()
     )
@@ -141,7 +141,9 @@ async def verify_with_clarifying_responses(
         verification_result = verification_service.verify_scenario(
             enhanced_variables,
             latest_compilation.z3_constraints,
-            policy.rules or []
+            policy.rules or [],
+            compilation_id=str(latest_compilation.id),
+            fallback_policy=policy_dict_from_row(policy),
         )
         
         # Store verification in database
@@ -203,7 +205,7 @@ async def smart_verify(
     latest_compilation = (
         db.query(PolicyCompilation)
         .filter(PolicyCompilation.policy_id == policy_id)
-        .filter(PolicyCompilation.compilation_status == "success")
+        .filter(PolicyCompilation.compilation_status == CompilationStatus.SUCCESS)
         .order_by(PolicyCompilation.compiled_at.desc())
         .first()
     )
@@ -216,7 +218,7 @@ async def smart_verify(
     
     try:
         # Step 1: Extract variables
-        extracted_variables = await variable_extractor.extract_variables(
+        extracted_variables = await get_variable_extractor().extract_variables(
             request.question,
             request.answer,
             policy.variables or []
@@ -226,7 +228,9 @@ async def smart_verify(
         verification_result = verification_service.verify_scenario(
             extracted_variables,
             latest_compilation.z3_constraints,
-            policy.rules or []
+            policy.rules or [],
+            compilation_id=str(latest_compilation.id),
+            fallback_policy=policy_dict_from_row(policy),
         )
         
         # Step 3: If result is definitive, return it

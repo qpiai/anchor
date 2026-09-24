@@ -43,6 +43,8 @@ class PolicyVariable(BaseModel):
     possible_values: Optional[List[str]] = None
     is_mandatory: bool = True
     default_value: Optional[str] = None
+    # Never read from request text; only from `facts` supplied by a trusted system.
+    trusted_only: bool = False
 
 class PolicyRule(BaseModel):
     id: str
@@ -86,6 +88,7 @@ class PolicyResponse(BaseModel):
     rules: Optional[List[Dict[str, Any]]]
     constraints: Optional[List[str]]
     examples: Optional[List[Dict[str, Any]]]
+    validation_errors: Optional[List[str]] = None
     created_at: datetime
     updated_at: datetime
 
@@ -114,7 +117,10 @@ class CompilationDetailsResponse(BaseModel):
 # Verification schemas
 class VerificationRequest(BaseModel):
     question: str
-    answer: str
+    answer: str = ""
+    # Facts from trusted systems (HR record, approval log, identity check). They override anything
+    # extracted from the text, so a request cannot talk its way into approval.
+    facts: Optional[Dict[str, Any]] = None
 
 class VerificationResponse(BaseModel):
     verification_id: uuid.UUID
@@ -122,6 +128,7 @@ class VerificationResponse(BaseModel):
     extracted_variables: Dict[str, Any]
     explanation: str
     suggestions: List[str] = []
+    details: Optional[Dict[str, Any]] = None
 
 class VerificationHistoryResponse(BaseModel):
     id: uuid.UUID
@@ -133,6 +140,7 @@ class VerificationHistoryResponse(BaseModel):
     explanation: Optional[str]
     suggestions: Optional[List[str]]
     verified_at: datetime
+    details: Optional[Dict[str, Any]] = None
 
     class Config:
         from_attributes = True

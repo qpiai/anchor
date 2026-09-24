@@ -3,11 +3,15 @@ from sqlalchemy.orm import Session
 from typing import List
 import uuid
 
-from ..core.database import get_db
-from ..models.database import PolicyDocument, Policy
-from ..models.schemas import DocumentUploadResponse, PolicyDocumentResponse, ErrorResponse
+import logging
+
+from ..core.database import SessionLocal, get_db
+from ..models.database import PolicyDocument, Policy, PolicyStatus
+from ..models.schemas import DocumentUploadResponse, PolicyDocumentResponse, PolicyResponse, ErrorResponse
 from ..services.document_processor import DocumentProcessor
 from ..services.policy_generator import PolicyGeneratorService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -45,7 +49,6 @@ async def upload_document(
             document.id,
             file_data['content'],
             domain,
-            db
         )
         
         return DocumentUploadResponse(
@@ -106,35 +109,44 @@ async def delete_document(document_id: uuid.UUID, db: Session = Depends(get_db))
     
     return {"message": "Document deleted successfully"}
 
-async def generate_policy_background(document_id: uuid.UUID, content: str, domain: str, db: Session):
+async def generate_policy_background(document_id: uuid.UUID, content: str, domain: str):
     """Background task to generate policy from document"""
-    
+    db = SessionLocal()
     try:
-        # Generate policy using LLM
         policy_data = await policy_generator.generate_policy_from_document(content, domain)
-        
-        # Create policy record
+        compile_errors = policy_data.pop("_compile_errors", None) or []
+        semantic_warnings = policy_data.pop("_semantic_warnings", None) or []
+        if compile_errors:
+            logger.warning(
+                "Saving document %s as draft; compile errors remain: %s",
+                document_id,
+                compile_errors,
+            )
+        else:
+            logger.info("Document %s policy compiled cleanly before save", document_id)
         policy = Policy(
             document_id=document_id,
             name=policy_data.get('policy_name', 'Generated Policy'),
             description=policy_data.get('description', ''),
             domain=domain,
             version=policy_data.get('version', '1.0'),
+            status=PolicyStatus.DRAFT,
             variables=policy_data.get('variables', []),
             rules=policy_data.get('rules', []),
             constraints=policy_data.get('constraints', []),
-            examples=policy_data.get('examples', [])
+            examples=policy_data.get('examples', []),
+            validation_errors=(compile_errors + semantic_warnings) or None,
         )
-        
         db.add(policy)
         db.commit()
-        
-        print(f"Policy generated successfully for document {document_id}")
-        
+        logger.info("Policy generated successfully for document %s", document_id)
     except Exception as e:
-        print(f"Policy generation failed for document {document_id}: {str(e)}")
+        logger.exception("Policy generation failed for document %s: %s", document_id, type(e).__name__)
+        db.rollback()
+    finally:
+        db.close()
 
-@router.get("/{document_id}/policies", response_model=List)
+@router.get("/{document_id}/policies", response_model=List[PolicyResponse])
 async def get_document_policies(document_id: uuid.UUID, db: Session = Depends(get_db)):
     """Get all policies generated from a specific document"""
     

@@ -1,14 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 import uuid
-import pickle
-import base64
 from datetime import datetime
 from typing import Dict, Any
 
 from ..core.database import get_db
 from ..models.database import Policy, PolicyCompilation, PolicyStatus, CompilationStatus
 from ..models.schemas import CompilationResponse, CompilationDetailsResponse
+from ..services.compiled_store import dumps_compilation
 from ..services.rule_compiler import RuleCompiler
 
 router = APIRouter(prefix="/policies", tags=["compilation"])
@@ -32,13 +31,7 @@ async def compile_policy(policy_id: uuid.UUID, db: Session = Depends(get_db)):
         # Compile using rule compiler
         compiled_result = rule_compiler.compile_policy(policy_dict)
         
-        # Store both the serializable data and the original policy for reconstruction
-        storage_data = {
-            'serializable_data': compiled_result['serializable_data'],
-            'original_policy': policy_dict
-        }
-        # Use base64 encoding to safely store binary data as text
-        serialized_constraints = base64.b64encode(pickle.dumps(storage_data)).decode('utf-8')
+        serialized_constraints = dumps_compilation(policy_dict, compiled_result)
         
         # Create compilation record
         compilation = PolicyCompilation(

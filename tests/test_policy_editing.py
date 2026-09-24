@@ -3,12 +3,25 @@
 Test the complete policy editing functionality - API endpoints and UI integration
 """
 
+import os
+
+import pytest
 import requests
 import json
 
-# Configuration
-API_BASE_URL = "http://localhost:8000"
+API_BASE_URL = os.getenv("ANCHOR_API_URL", "http://localhost:9066").rstrip("/")
 API_V1_PREFIX = "/api/v1"
+
+
+def _api_reachable() -> bool:
+    try:
+        response = requests.get(f"{API_BASE_URL}/ping", timeout=2)
+        return response.status_code == 200
+    except requests.RequestException:
+        return False
+
+
+pytestmark = pytest.mark.skipif(not _api_reachable(), reason="Anchor API is not reachable")
 
 def test_policy_crud_apis():
     """Test all policy CRUD API endpoints"""

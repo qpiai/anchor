@@ -2,21 +2,20 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
 import uuid
-import pickle
 
 from ..core.database import get_db
-from ..models.database import Policy, PolicyCompilation, Verification, VerificationResult, CompilationStatus
+from ..models.database import Policy, Verification, VerificationResult
 from ..models.schemas import (
     VerificationRequest, VerificationResponse, VerificationHistoryResponse
 )
-from ..services.variable_extractor import VariableExtractorService
-from ..services.verification import VerificationService
+from ..services.decision import (
+    PolicyNotCompiledError, PolicyNotFoundError, decide, load_compiled_policy, summarize,
+)
+from ..services.extraction import get_variable_extractor
+from ..services.jev_extractor import ExtractorUnavailableError
 
 router = APIRouter(prefix="/policies", tags=["verification"])
 
-# Initialize services
-variable_extractor = VariableExtractorService()
-verification_service = VerificationService()
 
 @router.post("/{policy_id}/verify", response_model=VerificationResponse)
 async def verify_policy(
@@ -25,129 +24,28 @@ async def verify_policy(
     db: Session = Depends(get_db)
 ):
     """Verify a Q&A pair against a compiled policy"""
-    
-    policy = db.query(Policy).filter(Policy.id == policy_id).first()
-    
-    if not policy:
-        raise HTTPException(status_code=404, detail="Policy not found")
-    
-    # Get latest compilation
-    latest_compilation = (
-        db.query(PolicyCompilation)
-        .filter(PolicyCompilation.policy_id == policy_id)
-        .filter(PolicyCompilation.compilation_status == CompilationStatus.SUCCESS)
-        .order_by(PolicyCompilation.compiled_at.desc())
-        .first()
-    )
-    
-    if not latest_compilation:
-        raise HTTPException(
-            status_code=400, 
-            detail="Policy must be compiled before verification. Please compile the policy first."
-        )
-    
+    policy, compilation = _load_or_http(db, policy_id)
     try:
-        # Extract variables from Q&A pair
-        print(f"Debug: Starting variable extraction for policy {policy_id}")
-        try:
-            extracted_variables = await variable_extractor.extract_variables(
-                request.question,
-                request.answer,
-                policy.variables or []
-            )
-            print(f"Debug: Variable extraction successful, extracted: {len(extracted_variables)} variables")
-        except Exception as e:
-            print(f"Debug: Variable extraction failed: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Variable extraction failed: {str(e)}")
-        
-        # Verify using Z3
-        print(f"Debug: Starting Z3 verification")
-        try:
-            verification_result = verification_service.verify_scenario(
-                extracted_variables,
-                latest_compilation.z3_constraints,
-                policy.rules or []
-            )
-            print(f"Debug: Z3 verification successful, result: {verification_result.get('result', 'unknown')}")
-        except Exception as e:
-            print(f"Debug: Z3 verification failed: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Z3 verification failed: {str(e)}")
-        
-        # Determine result enum (handle both enum values and legacy string values)
-        print(f"Debug: Mapping result '{verification_result['result']}' to enum")
-        try:
-            result_value = verification_result['result']
-            if isinstance(result_value, VerificationResult):
-                result_enum = result_value
-            elif result_value == VerificationResult.VALID.value or result_value == 'valid':
-                result_enum = VerificationResult.VALID
-            elif result_value == VerificationResult.INVALID.value or result_value == 'invalid':
-                result_enum = VerificationResult.INVALID
-            elif result_value == VerificationResult.NEEDS_CLARIFICATION.value or result_value == 'needs_clarification':
-                result_enum = VerificationResult.NEEDS_CLARIFICATION
-            else:
-                result_enum = VerificationResult.ERROR
-            print(f"Debug: Enum mapping successful: {result_enum}")
-        except Exception as e:
-            print(f"Debug: Enum mapping failed: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Result enum mapping failed: {str(e)}")
-        
-        # Store verification in database
-        try:
-            verification = Verification(
-                policy_id=policy_id,
-                question=request.question,
-                answer=request.answer,
-                extracted_variables=extracted_variables,
-                verification_result=result_enum.value,  # Use .value to get the string value
-                explanation=verification_result['explanation'],
-                suggestions=verification_result['suggestions']
-            )
-            
-            db.add(verification)
-            db.commit()
-            db.refresh(verification)
-        except Exception as db_error:
-            print(f"Database error: {str(db_error)}")
-            db.rollback()
-            raise HTTPException(status_code=500, detail=f"Database error: {str(db_error)}")
-        
-        return VerificationResponse(
-            verification_id=verification.id,
-            result=result_enum,
-            extracted_variables=extracted_variables,
-            explanation=verification_result['explanation'],
-            suggestions=verification_result['suggestions']
-        )
-        
-    except Exception as e:
-        # Store failed verification with rollback handling
-        try:
-            verification = Verification(
-                policy_id=policy_id,
-                question=request.question,
-                answer=request.answer,
-                extracted_variables={},
-                verification_result=VerificationResult.ERROR.value,  # Use .value to get the string value
-                explanation=f"Verification failed: {str(e)}",
-                suggestions=[]
-            )
-            
-            db.add(verification)
-            db.commit()
-            db.refresh(verification)
-        except Exception as db_error:
-            print(f"Database error in exception handler: {str(db_error)}")
-            db.rollback()
-            # Continue with the original error response even if DB logging fails
-        
-        return VerificationResponse(
-            verification_id=getattr(verification, 'id', uuid.uuid4()) if 'verification' in locals() else uuid.uuid4(),
-            result=VerificationResult.ERROR,
-            extracted_variables={},
-            explanation=f"Verification failed: {str(e)}",
-            suggestions=["Please check the policy compilation and try again"]
-        )
+        outcome = await decide(db, policy, compilation, request.question, request.answer, facts=request.facts)
+    except ExtractorUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return VerificationResponse(
+        verification_id=outcome["verification_id"],
+        result=outcome["result"],
+        extracted_variables=outcome["extracted_variables"],
+        explanation=outcome["explanation"],
+        suggestions=outcome["suggestions"],
+        details=outcome["details"],
+    )
+
+
+def _load_or_http(db: Session, policy_id: uuid.UUID):
+    try:
+        return load_compiled_policy(db, policy_id)
+    except PolicyNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PolicyNotCompiledError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 @router.get("/{policy_id}/verifications", response_model=List[VerificationHistoryResponse])
 async def get_verification_history(
@@ -168,9 +66,13 @@ async def get_verification_history(
     
     # Apply result filter if provided
     if result_filter:
-        if result_filter not in ['valid', 'invalid', 'error']:
-            raise HTTPException(status_code=400, detail="Invalid result filter. Use: valid, invalid, or error")
-        query = query.filter(Verification.verification_result == result_filter)
+        wanted = result_filter.upper()
+        if wanted not in {item.value for item in VerificationResult}:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid result filter. Use: valid, invalid, needs_clarification, or error",
+            )
+        query = query.filter(Verification.verification_result == wanted)
     
     verifications = (
         query
@@ -228,6 +130,7 @@ async def test_variable_extraction(
     
     try:
         # Extract variables from Q&A pair
+        variable_extractor = get_variable_extractor()
         extracted_variables = await variable_extractor.extract_variables(
             request.question,
             request.answer,
@@ -260,95 +163,25 @@ async def batch_verify(
     db: Session = Depends(get_db)
 ):
     """Verify multiple Q&A pairs against a policy"""
-    
-    policy = db.query(Policy).filter(Policy.id == policy_id).first()
-    
-    if not policy:
-        raise HTTPException(status_code=404, detail="Policy not found")
-    
-    # Get latest compilation
-    latest_compilation = (
-        db.query(PolicyCompilation)
-        .filter(PolicyCompilation.policy_id == policy_id)
-        .filter(PolicyCompilation.compilation_status == CompilationStatus.SUCCESS)
-        .order_by(PolicyCompilation.compiled_at.desc())
-        .first()
-    )
-    
-    if not latest_compilation:
-        raise HTTPException(
-            status_code=400, 
-            detail="Policy must be compiled before verification. Please compile the policy first."
-        )
-    
+    policy, compilation = _load_or_http(db, policy_id)
     results = []
-    
     for request in requests:
         try:
-            # Extract variables
-            extracted_variables = await variable_extractor.extract_variables(
-                request.question,
-                request.answer,
-                policy.variables or []
+            outcome = await decide(
+                db, policy, compilation, request.question, request.answer, commit=False, facts=request.facts
             )
-            
-            # Verify
-            verification_result = verification_service.verify_scenario(
-                extracted_variables,
-                latest_compilation.z3_constraints,
-                policy.rules or []
-            )
-            
-            # Determine result enum for batch processing
-            if verification_result['result'] == 'valid':
-                batch_result_enum = VerificationResult.VALID
-            elif verification_result['result'] == 'invalid':
-                batch_result_enum = VerificationResult.INVALID
-            elif verification_result['result'] == 'needs_clarification':
-                batch_result_enum = VerificationResult.NEEDS_CLARIFICATION
-            else:
-                batch_result_enum = VerificationResult.ERROR
-                
-            # Store in database
-            verification = Verification(
-                policy_id=policy_id,
-                question=request.question,
-                answer=request.answer,
-                extracted_variables=extracted_variables,
-                verification_result=batch_result_enum.value,  # Use .value to get the string value
-                explanation=verification_result['explanation'],
-                suggestions=verification_result['suggestions']
-            )
-            
-            db.add(verification)
-            
-            results.append({
-                "question": request.question,
-                "answer": request.answer,
-                "result": verification_result['result'],
-                "extracted_variables": extracted_variables,
-                "explanation": verification_result['explanation'],
-                "suggestions": verification_result['suggestions']
-            })
-            
-        except Exception as e:
-            results.append({
-                "question": request.question,
-                "answer": request.answer,
-                "result": "error",
-                "extracted_variables": {},
-                "explanation": f"Verification failed: {str(e)}",
-                "suggestions": []
-            })
-    
+        except ExtractorUnavailableError as exc:
+            db.commit()
+            raise HTTPException(status_code=503, detail=str(exc))
+        results.append({
+            "question": request.question,
+            "answer": request.answer,
+            "verification_id": str(outcome["verification_id"]),
+            "result": outcome["result"],
+            "extracted_variables": outcome["extracted_variables"],
+            "explanation": outcome["explanation"],
+            "suggestions": outcome["suggestions"],
+            "details": outcome["details"],
+        })
     db.commit()
-    
-    return {
-        "total_processed": len(requests),
-        "results": results,
-        "summary": {
-            "valid": len([r for r in results if r['result'] == 'valid']),
-            "invalid": len([r for r in results if r['result'] == 'invalid']),
-            "errors": len([r for r in results if r['result'] == 'error'])
-        }
-    } 
+    return {"total_processed": len(requests), "results": results, "summary": summarize(results)}

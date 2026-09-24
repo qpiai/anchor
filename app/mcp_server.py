@@ -1,365 +1,240 @@
-import asyncio
 import logging
 import uuid
-from typing import List, Dict, Any, Optional
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List, Optional
+
 from fastmcp import FastMCP
-from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
-from .core.database import get_db
-from .core.config import settings
-from .models.database import Policy, PolicyCompilation, CompilationStatus
-from .models.schemas import VerificationResult
-from .services.verification import VerificationService
-from .services.variable_extractor import VariableExtractorService
+from .core.database import SessionLocal
+from .models.database import CompilationStatus, Policy, PolicyCompilation, Verification
+from .services.decision import (
+    PolicyNotCompiledError,
+    PolicyNotFoundError,
+    decide,
+    load_compiled_policy,
+    summarize,
+)
+from .services.jev_extractor import ExtractorUnavailableError
 
-# Configure logging to stderr (required for MCP STDIO transport)
+# Logs go to stderr; stdout is the MCP STDIO channel.
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
 
-# Initialize services
-verification_service = VerificationService()
-variable_extractor = VariableExtractorService()
-
-# Create MCP server
 mcp = FastMCP("Anchor Policy Verification Server")
 
-# Keep Pydantic models for documentation but use individual parameters in tools
+
+@contextmanager
+def _session() -> Iterator[Session]:
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def _facts(outcome: dict) -> Dict[str, Any]:
+    details = outcome.get("details") or {}
+    confidence = details.get("confidence") or {}
+    facts = {}
+    for name, value in (outcome.get("extracted_variables") or {}).items():
+        stated = value not in ("MISSING_MANDATORY", "SKIP_RULE")
+        facts[name] = {"value": value if stated else None, "confidence": confidence.get(name)}
+    return facts
+
+
+def _decision_payload(outcome: dict) -> Dict[str, Any]:
+    details = outcome.get("details") or {}
+    return {
+        "success": outcome["result"] != "ERROR",
+        "verification_id": str(outcome["verification_id"]),
+        "result": outcome["result"],
+        "explanation": outcome["explanation"],
+        "suggestions": outcome["suggestions"],
+        "facts": _facts(outcome),
+        "missing_facts": details.get("missing_mandatory_vars") or [],
+        "failed_rules": details.get("failed_rules") or [],
+        "flags": details.get("flags") or {},
+        "extractor": details.get("extractor"),
+        "fallback_used": details.get("fallback_used", False),
+        "latency_ms": details.get("latency_ms"),
+    }
+
+
+def _error(message: str, **extra) -> Dict[str, Any]:
+    return {"success": False, "result": "ERROR", "explanation": message, **extra}
+
+
+def _load(db: Session, policy_id: str):
+    return load_compiled_policy(db, uuid.UUID(policy_id))
+
 
 @mcp.tool
 def list_policies() -> Dict[str, Any]:
     """
-    List all available compiled policies that can be used for verification.
-    Returns policies with their IDs, names, domains, and compilation status.
+    List compiled policies that can be used for verification.
+    Returns each policy's id, name, description, domain, and variable/rule counts.
     """
-    try:
-        db = next(get_db())
-
-        # Get all policies with successful compilations
-        policies = db.query(Policy).join(PolicyCompilation).filter(
-            PolicyCompilation.compilation_status == CompilationStatus.SUCCESS
-        ).all()
-
-        result = []
-        for policy in policies:
-            result.append({
+    with _session() as db:
+        policies = (
+            db.query(Policy)
+            .filter(
+                Policy.id.in_(
+                    db.query(PolicyCompilation.policy_id).filter(
+                        PolicyCompilation.compilation_status == CompilationStatus.SUCCESS
+                    )
+                )
+            )
+            .order_by(Policy.created_at.desc())
+            .all()
+        )
+        items = [
+            {
                 "id": str(policy.id),
                 "name": policy.name,
                 "description": policy.description or "",
                 "domain": policy.domain,
                 "created_at": policy.created_at.isoformat(),
-                "variable_count": len(policy.variables) if policy.variables else 0,
-                "rule_count": len(policy.rules) if policy.rules else 0
-            })
+                "variable_count": len(policy.variables or []),
+                "rule_count": len(policy.rules or []),
+            }
+            for policy in policies
+        ]
+    return {"success": True, "policies": items, "total_count": len(items)}
 
-        db.close()
-
-        return {
-            "success": True,
-            "policies": result,
-            "total_count": len(result)
-        }
-
-    except Exception as e:
-        logger.error(f"Error listing policies: {str(e)}")
-        return {
-            "success": False,
-            "error": f"Failed to list policies: {str(e)}",
-            "policies": []
-        }
 
 @mcp.tool
-async def verify_response(policy_id: str, question: str, answer: str) -> Dict[str, Any]:
+async def verify_response(
+    policy_id: str, question: str, answer: str = "", facts: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """
-    Verify a question-answer pair against a compiled policy.
+    Decide whether a request is allowed under a compiled policy.
 
-    This tool takes a policy ID, question, and answer, then:
-    1. Extracts variables from the Q&A pair
-    2. Verifies the scenario against the policy's Z3 constraints
-    3. Returns verification result with explanation
+    `question` is the request (for an AI agent: the action it wants to take and why).
+    `answer` is optional context or the proposed answer/action details.
+    `facts` is optional {variable: value} from trusted systems (approval log, identity check, HR record).
+    Trusted facts override the text; variables marked trusted_only are never read from the text.
 
-    Returns:
-    - result: "valid", "invalid", "needs_clarification", or "error"
-    - explanation: Human-readable explanation of the result
-    - extracted_variables: Variables extracted from the Q&A pair
-    - suggestions: List of clarifying questions if needed
+    Facts are extracted with per-fact confidence, then the Z3 solver decides.
+    Returns result VALID, INVALID, NEEDS_CLARIFICATION, or ERROR, plus the explanation,
+    clarifying questions (suggestions), extracted facts, missing facts, failed rules,
+    guard flags (out_of_scope, injection_suspected), and a verification_id for the audit log.
+    Treat anything other than VALID as "do not proceed".
     """
     try:
-        db = next(get_db())
+        with _session() as db:
+            policy, compilation = _load(db, policy_id)
+            outcome = await decide(db, policy, compilation, question, answer, facts=facts)
+            return _decision_payload(outcome)
+    except ValueError:
+        return _error(f"Invalid policy ID format: {policy_id}")
+    except (PolicyNotFoundError, PolicyNotCompiledError) as exc:
+        return _error(str(exc))
+    except ExtractorUnavailableError as exc:
+        return _error(str(exc))
+    except Exception as exc:
+        logger.exception("verify_response failed")
+        return _error(f"Verification failed: {exc}")
 
-        # Validate policy exists and is compiled
-        policy_uuid = uuid.UUID(policy_id)
-        policy = db.query(Policy).filter(Policy.id == policy_uuid).first()
-
-        if not policy:
-            db.close()
-            return {
-                "success": False,
-                "result": "error",
-                "explanation": f"Policy with ID {policy_id} not found",
-                "extracted_variables": {},
-                "suggestions": []
-            }
-
-        # Get latest successful compilation
-        latest_compilation = (
-            db.query(PolicyCompilation)
-            .filter(PolicyCompilation.policy_id == policy_uuid)
-            .filter(PolicyCompilation.compilation_status == CompilationStatus.SUCCESS)
-            .order_by(PolicyCompilation.compiled_at.desc())
-            .first()
-        )
-
-        if not latest_compilation:
-            db.close()
-            return {
-                "success": False,
-                "result": "error",
-                "explanation": f"Policy {policy.name} is not compiled. Please compile the policy first.",
-                "extracted_variables": {},
-                "suggestions": ["Compile the policy before attempting verification"]
-            }
-
-        # Extract variables from Q&A pair
-        try:
-            extracted_variables = await variable_extractor.extract_variables(
-                question,
-                answer,
-                policy.variables or []
-            )
-        except Exception as e:
-            db.close()
-            return {
-                "success": False,
-                "result": "error",
-                "explanation": f"Variable extraction failed: {str(e)}",
-                "extracted_variables": {},
-                "suggestions": ["Check that the question and answer are properly formatted"]
-            }
-
-        # Verify using Z3
-        try:
-            verification_result = verification_service.verify_scenario(
-                extracted_variables,
-                latest_compilation.z3_constraints,
-                policy.rules or []
-            )
-        except Exception as e:
-            db.close()
-            return {
-                "success": False,
-                "result": "error",
-                "explanation": f"Z3 verification failed: {str(e)}",
-                "extracted_variables": extracted_variables,
-                "suggestions": ["Check policy compilation and try again"]
-            }
-
-        db.close()
-
-        return {
-            "success": True,
-            "result": verification_result.get('result', 'error'),
-            "explanation": verification_result.get('explanation', 'No explanation provided'),
-            "extracted_variables": extracted_variables,
-            "suggestions": verification_result.get('suggestions', [])
-        }
-
-    except ValueError as e:
-        return {
-            "success": False,
-            "result": "error",
-            "explanation": f"Invalid policy ID format: {str(e)}",
-            "extracted_variables": {},
-            "suggestions": ["Provide a valid UUID for the policy ID"]
-        }
-    except Exception as e:
-        logger.error(f"Error in verify_response: {str(e)}")
-        return {
-            "success": False,
-            "result": "error",
-            "explanation": f"Verification failed: {str(e)}",
-            "extracted_variables": {},
-            "suggestions": ["Check the input parameters and try again"]
-        }
 
 @mcp.tool
-async def batch_verify(policy_id: str, qa_pairs: List[Dict[str, str]]) -> Dict[str, Any]:
+async def batch_verify(policy_id: str, qa_pairs: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Verify multiple question-answer pairs against a single policy.
-
-    This tool processes multiple Q&A pairs in batch for efficiency.
-    Returns summary statistics and individual results for each pair.
+    Verify several requests against one policy. Each item is {"question": ..., "answer": ..., "facts": {...}}.
+    Returns per-item decisions (same shape as verify_response) and a summary count.
     """
     try:
-        db = next(get_db())
-
-        # Validate policy exists and is compiled
-        policy_uuid = uuid.UUID(policy_id)
-        policy = db.query(Policy).filter(Policy.id == policy_uuid).first()
-
-        if not policy:
-            db.close()
-            return {
-                "success": False,
-                "error": f"Policy with ID {policy_id} not found",
-                "results": [],
-                "summary": {"total": 0, "valid": 0, "invalid": 0, "needs_clarification": 0, "errors": 0}
-            }
-
-        # Get latest successful compilation
-        latest_compilation = (
-            db.query(PolicyCompilation)
-            .filter(PolicyCompilation.policy_id == policy_uuid)
-            .filter(PolicyCompilation.compilation_status == CompilationStatus.SUCCESS)
-            .order_by(PolicyCompilation.compiled_at.desc())
-            .first()
-        )
-
-        if not latest_compilation:
-            db.close()
-            return {
-                "success": False,
-                "error": f"Policy {policy.name} is not compiled",
-                "results": [],
-                "summary": {"total": 0, "valid": 0, "invalid": 0, "needs_clarification": 0, "errors": 0}
-            }
-
-        results = []
-        summary = {"total": len(qa_pairs), "valid": 0, "invalid": 0, "needs_clarification": 0, "errors": 0}
-
-        for i, qa_pair in enumerate(qa_pairs):
-            question = qa_pair.get("question", "")
-            answer = qa_pair.get("answer", "")
-
-            try:
-                # Extract variables
-                extracted_variables = await variable_extractor.extract_variables(
-                    question,
-                    answer,
-                    policy.variables or []
+        with _session() as db:
+            policy, compilation = _load(db, policy_id)
+            results = []
+            for index, pair in enumerate(qa_pairs):
+                outcome = await decide(
+                    db, policy, compilation, pair.get("question", ""), pair.get("answer", ""), commit=False,
+                    facts=pair.get("facts"),
                 )
+                results.append({"index": index, **_decision_payload(outcome)})
+            db.commit()
+        return {"success": True, "results": results, "summary": summarize(results)}
+    except ValueError:
+        return _error(f"Invalid policy ID format: {policy_id}", results=[])
+    except (PolicyNotFoundError, PolicyNotCompiledError, ExtractorUnavailableError) as exc:
+        return _error(str(exc), results=[])
+    except Exception as exc:
+        logger.exception("batch_verify failed")
+        return _error(f"Batch verification failed: {exc}", results=[])
 
-                # Verify
-                verification_result = verification_service.verify_scenario(
-                    extracted_variables,
-                    latest_compilation.z3_constraints,
-                    policy.rules or []
-                )
-
-                result = verification_result.get('result', 'error')
-                summary[result] = summary.get(result, 0) + 1
-
-                results.append({
-                    "index": i,
-                    "question": question,
-                    "answer": answer,
-                    "result": result,
-                    "explanation": verification_result.get('explanation', ''),
-                    "extracted_variables": extracted_variables,
-                    "suggestions": verification_result.get('suggestions', [])
-                })
-
-            except Exception as e:
-                summary["errors"] += 1
-                results.append({
-                    "index": i,
-                    "question": question,
-                    "answer": answer,
-                    "result": "error",
-                    "explanation": f"Verification failed: {str(e)}",
-                    "extracted_variables": {},
-                    "suggestions": []
-                })
-
-        db.close()
-
-        return {
-            "success": True,
-            "results": results,
-            "summary": summary
-        }
-
-    except ValueError as e:
-        return {
-            "success": False,
-            "error": f"Invalid policy ID format: {str(e)}",
-            "results": [],
-            "summary": {"total": 0, "valid": 0, "invalid": 0, "needs_clarification": 0, "errors": 0}
-        }
-    except Exception as e:
-        logger.error(f"Error in batch_verify: {str(e)}")
-        return {
-            "success": False,
-            "error": f"Batch verification failed: {str(e)}",
-            "results": [],
-            "summary": {"total": 0, "valid": 0, "invalid": 0, "needs_clarification": 0, "errors": 0}
-        }
 
 @mcp.tool
 def get_policy_info(policy_id: str) -> Dict[str, Any]:
     """
-    Get detailed information about a policy including its variables, rules, and metadata.
-
-    This is useful for understanding what variables and rules a policy contains
-    before attempting verification.
+    Get a policy's variables (facts it needs), rules, and compilation status.
+    Useful before verification to know which facts to state in the request.
     """
     try:
-        db = next(get_db())
-
-        policy_uuid = uuid.UUID(policy_id)
-        policy = db.query(Policy).filter(Policy.id == policy_uuid).first()
-
-        if not policy:
-            db.close()
+        with _session() as db:
+            policy = db.query(Policy).filter(Policy.id == uuid.UUID(policy_id)).first()
+            if not policy:
+                return {"success": False, "error": f"Policy with ID {policy_id} not found"}
+            compilation = (
+                db.query(PolicyCompilation)
+                .filter(PolicyCompilation.policy_id == policy.id)
+                .filter(PolicyCompilation.compilation_status == CompilationStatus.SUCCESS)
+                .order_by(PolicyCompilation.compiled_at.desc())
+                .first()
+            )
             return {
-                "success": False,
-                "error": f"Policy with ID {policy_id} not found"
+                "success": True,
+                "policy": {
+                    "id": str(policy.id),
+                    "name": policy.name,
+                    "description": policy.description or "",
+                    "domain": policy.domain,
+                    "created_at": policy.created_at.isoformat(),
+                    "updated_at": policy.updated_at.isoformat(),
+                    "is_compiled": compilation is not None,
+                    "compiled_at": compilation.compiled_at.isoformat() if compilation else None,
+                    "variables": policy.variables or [],
+                    "rules": policy.rules or [],
+                },
             }
+    except ValueError:
+        return {"success": False, "error": f"Invalid policy ID format: {policy_id}"}
 
-        # Check compilation status
-        latest_compilation = (
-            db.query(PolicyCompilation)
-            .filter(PolicyCompilation.policy_id == policy_uuid)
-            .filter(PolicyCompilation.compilation_status == CompilationStatus.SUCCESS)
-            .order_by(PolicyCompilation.compiled_at.desc())
-            .first()
-        )
 
-        db.close()
-
-        return {
-            "success": True,
-            "policy": {
-                "id": str(policy.id),
-                "name": policy.name,
-                "description": policy.description or "",
-                "domain": policy.domain,
-                "created_at": policy.created_at.isoformat(),
-                "updated_at": policy.updated_at.isoformat(),
-                "is_compiled": latest_compilation is not None,
-                "compiled_at": latest_compilation.compiled_at.isoformat() if latest_compilation else None,
-                "variables": policy.variables or [],
-                "rules": policy.rules or [],
-                "examples": policy.examples or []
+@mcp.tool
+def get_verification(verification_id: str) -> Dict[str, Any]:
+    """
+    Look up a past decision from the audit log by verification_id: request, verdict,
+    explanation, extracted facts, and details (confidence, rule trace, latency, extractor).
+    """
+    try:
+        with _session() as db:
+            row = db.query(Verification).filter(Verification.id == uuid.UUID(verification_id)).first()
+            if not row:
+                return {"success": False, "error": f"Verification {verification_id} not found"}
+            return {
+                "success": True,
+                "verification": {
+                    "id": str(row.id),
+                    "policy_id": str(row.policy_id),
+                    "question": row.question,
+                    "answer": row.answer,
+                    "result": row.verification_result,
+                    "explanation": row.explanation,
+                    "suggestions": row.suggestions or [],
+                    "extracted_variables": row.extracted_variables or {},
+                    "details": row.details,
+                    "verified_at": row.verified_at.isoformat() if row.verified_at else None,
+                },
             }
-        }
+    except ValueError:
+        return {"success": False, "error": f"Invalid verification ID format: {verification_id}"}
 
-    except ValueError as e:
-        return {
-            "success": False,
-            "error": f"Invalid policy ID format: {str(e)}"
-        }
-    except Exception as e:
-        logger.error(f"Error in get_policy_info: {str(e)}")
-        return {
-            "success": False,
-            "error": f"Failed to get policy info: {str(e)}"
-        }
 
 if __name__ == "__main__":
-    # Run the MCP server
     logger.info("Starting Anchor Policy Verification MCP Server...")
     mcp.run()

@@ -49,6 +49,7 @@ class Policy(Base):
     rules = Column(JSON)      # Policy rules and conditions
     constraints = Column(JSON)  # Global constraints
     examples = Column(JSON)   # Test scenarios
+    validation_errors = Column(JSON)
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -82,6 +83,7 @@ class Verification(Base):
     verification_result = Column(String)  # Temporary: Use String instead of Enum to avoid PostgreSQL enum issues
     explanation = Column(Text)
     suggestions = Column(JSON)
+    details = Column(JSON)
     verified_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships

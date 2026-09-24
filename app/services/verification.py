@@ -1,11 +1,13 @@
-import pickle
-import base64
-import json
+import logging
+import re
 from typing import Dict, Any, List, Tuple
 from z3 import *
+from .compiled_store import dumps_compilation, get_compiled, resolve_stored_policy
 from .rule_compiler import RuleCompiler
 from .clarifying_questions import ClarifyingQuestionService
 from ..models.schemas import VerificationResult
+
+logger = logging.getLogger(__name__)
 
 class VerificationService:
     def __init__(self):
@@ -35,7 +37,7 @@ class VerificationService:
             if var_data['type'] == 'string' or var_data['type'] == 'enum':
                 z3_vars[var_name] = String(var_name)
             elif var_data['type'] == 'number':
-                z3_vars[var_name] = Int(var_name)
+                z3_vars[var_name] = Real(var_name)
             elif var_data['type'] == 'boolean':
                 z3_vars[var_name] = Bool(var_name)
         
@@ -59,218 +61,246 @@ class VerificationService:
             'constraints': reconstructed_constraints
         }
     
-    def verify_scenario(self, extracted_variables: Dict[str, Any], z3_constraints: str, policy_rules: List[Dict]) -> Dict[str, Any]:
-        """Use Z3 to verify extracted variables against compiled policies with comprehensive variable state handling"""
-        
+    def verify_scenario(
+        self,
+        extracted_variables: Dict[str, Any],
+        z3_constraints: str,
+        policy_rules: List[Dict],
+        compilation_id: str | None = None,
+        fallback_policy: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        """Verify extracted variables against a compiled policy.
+
+        Precedence, first match wins:
+        1. A global constraint already violated by the known facts is INVALID.
+           The failed entry is named with that constraint. Asking for more
+           facts cannot repair a value that is already impossible.
+        2. An invalid-concluding rule already satisfied by the known facts is
+           INVALID, even if other mandatory variables are missing. INVALID is
+           the safer answer when the violation does not depend on those
+           missing variables. If every invalid rule still depends on a missing
+           variable, the result is NEEDS_CLARIFICATION instead.
+        3. Any remaining missing mandatory variable is NEEDS_CLARIFICATION
+           and lists missing_mandatory_vars.
+        4. VALID requires positive permission: at least one valid-concluding
+           rule is satisfied, and no invalid-concluding rule is satisfied.
+           A skipped rule (optional variable with no default) is not permission.
+        5. If nothing fires, the result is NEEDS_CLARIFICATION with
+           uncovered=true and the explanation
+           "No policy rule covers this case; route to human review."
+        """
+
         try:
-            # Check for missing mandatory variables first
-            missing_mandatory = [var_name for var_name, var_value in extracted_variables.items() 
+            missing_mandatory = [var_name for var_name, var_value in extracted_variables.items()
                                if var_value == "MISSING_MANDATORY"]
-            
-            if missing_mandatory:
-                return {
-                    'result': 'needs_clarification',
-                    'rule_results': [],
-                    'failed_rules': [],
-                    'explanation': f"❓ Missing required information for: {', '.join(missing_mandatory)}",
-                    'suggestions': self._generate_mandatory_questions(missing_mandatory),
-                    'missing_mandatory_vars': missing_mandatory
-                }
-            
-            # Deserialize base64-encoded policy data
-            decoded_data = base64.b64decode(z3_constraints.encode('utf-8'))
-            storage_data = pickle.loads(decoded_data)
-            
-            # Reconstruct Z3 objects from storage data
-            reconstructed_policy = self._reconstruct_z3_objects(storage_data)
-            
-            # Filter out variables that should cause rule skipping
+
+            policy_dict = resolve_stored_policy(z3_constraints, fallback_policy)
+            reconstructed_policy = get_compiled(
+                str(compilation_id) if compilation_id else None,
+                policy_dict,
+            )
+
             effective_variables = {}
             skipped_variables = []
-            
             for var_name, var_value in extracted_variables.items():
                 if var_value == "SKIP_RULE":
                     skipped_variables.append(var_name)
-                elif var_value != "MISSING_MANDATORY" and var_value is not None:  # Only valid values
+                elif var_value != "MISSING_MANDATORY" and var_value is not None:
                     effective_variables[var_name] = var_value
-            
-            # Create Z3 solver
-            solver = Solver()
-            
-            # Add global constraints
-            for constraint in reconstructed_policy['constraints']:
-                solver.add(constraint)
-            
-            # Set variable values from effective variables only
+
             z3_vars = reconstructed_policy['variables']
-            for var_name, var_value in effective_variables.items():
-                if var_name in z3_vars:
-                    z3_var = z3_vars[var_name]
-                    try:
-                        if isinstance(var_value, str):
-                            solver.add(z3_var == StringVal(var_value))
-                        elif isinstance(var_value, bool):
-                            solver.add(z3_var == BoolVal(var_value))
-                        elif isinstance(var_value, (int, float)):
-                            if isinstance(var_value, float):
-                                solver.add(z3_var == RealVal(var_value))
-                            else:
-                                solver.add(z3_var == IntVal(var_value))
-                    except Exception as z3_error:
-                        # Log and skip variables that cause Z3 errors
-                        print(f"Warning: Skipping variable {var_name} due to Z3 error: {str(z3_error)}")
-                        continue
-            
-            # Evaluate rules using a different approach:
-            # We need to check if the current variable assignment satisfies all rules
+            constraint_labels = list(policy_dict.get('constraints') or [])
+            violated_constraints = self._violated_constraints(
+                z3_vars,
+                reconstructed_policy['constraints'],
+                constraint_labels,
+                effective_variables,
+            )
+            if violated_constraints:
+                failed_rules = [
+                    {
+                        'id': label,
+                        'description': f"Global constraint violated: {label}",
+                    }
+                    for label in violated_constraints
+                ]
+                rule_results = [
+                    {
+                        'rule_id': label,
+                        'result': 'fail',
+                        'description': f"Global constraint violated: {label}",
+                        'reason': 'Global constraint violated',
+                    }
+                    for label in violated_constraints
+                ]
+                return {
+                    'result': VerificationResult.INVALID.value,
+                    'rule_results': rule_results,
+                    'failed_rules': [rule['id'] for rule in failed_rules],
+                    'explanation': self.explain_verification_result(False, failed_rules),
+                    'suggestions': self.generate_suggestions(failed_rules, effective_variables),
+                }
+
             rule_results = []
             failed_rules = []
-            
-            # Create a complete model with all variable assignments
-            all_constraints_solver = Solver()
-            
-            # Add all global constraints
-            for constraint in reconstructed_policy['constraints']:
-                all_constraints_solver.add(constraint)
-            
-            # Add all variable assignments (use effective_variables to avoid special markers)
-            for var_name, var_value in effective_variables.items():
-                if var_name in z3_vars:
-                    z3_var = z3_vars[var_name]
-                    try:
-                        if isinstance(var_value, str):
-                            all_constraints_solver.add(z3_var == StringVal(var_value))
-                        elif isinstance(var_value, bool):
-                            all_constraints_solver.add(z3_var == BoolVal(var_value))
-                        elif isinstance(var_value, (int, float)):
-                            if isinstance(var_value, float):
-                                all_constraints_solver.add(z3_var == RealVal(var_value))
-                            else:
-                                all_constraints_solver.add(z3_var == IntVal(var_value))
-                    except Exception as z3_error:
-                        # Log and skip variables that cause Z3 errors
-                        print(f"Warning: Skipping variable {var_name} in all_constraints_solver due to Z3 error: {str(z3_error)}")
-                        continue
-            
-            # Evaluate each rule with rule skipping logic
             applicable_rules = []
             violated_rules = []
             supporting_rules = []
             skipped_rules = []
-            
+            open_denies: List[str] = []   # unknown facts that could still trigger a deny rule
+            open_permits: List[str] = []  # unknown facts that could still grant permission
+            unknown_variables = skipped_variables + missing_mandatory
+
+            # Only numeric range constraints ("leave_days > 0") may be assumed about unknown facts.
+            # Anything else ("leave_days <= 30 OR has_manager_approval == true", 'method == "email"')
+            # is a business rule: assuming it would fill an unknown fact with the compliant value.
+            numeric = {name for name, var in z3_vars.items() if var.sort() in (RealSort(), IntSort())}
+            solver = Solver()
+            policy_constraints = []
+            for index, constraint in enumerate(reconstructed_policy['constraints']):
+                label = constraint_labels[index] if index < len(constraint_labels) else f"constraint_{index}"
+                if self._is_range_constraint(label, numeric):
+                    solver.add(constraint)
+                else:
+                    policy_constraints.append((label, constraint))
+            self._add_assignments(solver, z3_vars, effective_variables)
+
+            # Three-valued rule evaluation over the unknown facts:
+            #   must fire  -> the rule applies whatever the unknowns are
+            #   can't fire -> the rule never applies, so its unknowns do not matter
+            #   may fire   -> the answer depends on an unknown fact
             for compiled_rule in reconstructed_policy['rules']:
-                # Check if this rule depends on any skipped variables
-                rule_uses_skipped_var = self._rule_depends_on_variables(compiled_rule, skipped_variables)
-                
-                if rule_uses_skipped_var:
-                    # Skip this rule because it depends on optional variables with no defaults
+                conclusion = str(compiled_rule.get('conclusion') or '').lower()
+                unknown_here = [
+                    name for name in unknown_variables
+                    if self._rule_depends_on_variables(compiled_rule, [name])
+                ]
+                try:
+                    can_fire = self._holds(solver, compiled_rule['constraint'])
+                    must_fire = can_fire and not self._holds(solver, Not(compiled_rule['constraint']))
+                except Exception as z3_error:
+                    # An unevaluable deny rule must not silently allow: treat it as undecided.
                     skipped_rules.append(compiled_rule)
+                    if conclusion == 'invalid':
+                        open_denies.extend(unknown_here or ["__rule_error__"])
                     rule_results.append({
                         'rule_id': compiled_rule['id'],
                         'result': 'skipped',
                         'description': compiled_rule['description'],
-                        'reason': f'Rule skipped due to unknown optional variables: {", ".join(skipped_variables)}'
+                        'reason': f'Rule skipped due to Z3 constraint error: {str(z3_error)}'
                     })
                     continue
-                
-                all_constraints_solver.push()  # Save current state
-                
-                try:
-                    # Check if the rule condition is satisfied by current variable assignments
-                    all_constraints_solver.add(compiled_rule['constraint'])
-                    condition_satisfied = all_constraints_solver.check() == sat
-                except Exception as z3_error:
-                    # Handle Z3 errors (like sort mismatch) gracefully
-                    if "sort mismatch" in str(z3_error).lower():
-                        # This rule likely depends on variables not properly handled
-                        all_constraints_solver.pop()  # Restore state
-                        skipped_rules.append(compiled_rule)
-                        rule_results.append({
-                            'rule_id': compiled_rule['id'],
-                            'result': 'skipped',
-                            'description': compiled_rule['description'],
-                            'reason': f'Rule skipped due to Z3 constraint error: {str(z3_error)}'
-                        })
-                        continue
-                    else:
-                        # Re-raise other Z3 errors
-                        all_constraints_solver.pop()  # Restore state
-                        raise
-                
-                all_constraints_solver.pop()  # Restore state
-                
-                if condition_satisfied:
-                    # Rule condition is TRUE - rule is applicable
+
+                if must_fire and conclusion == 'valid':
                     applicable_rules.append(compiled_rule)
-                    
-                    if compiled_rule.get('conclusion') == 'valid':
-                        # This rule supports validity
-                        supporting_rules.append(compiled_rule)
-                        rule_results.append({
-                            'rule_id': compiled_rule['id'],
-                            'result': 'pass',
-                            'description': compiled_rule['description'],
-                            'reason': 'Rule condition satisfied and supports validity'
-                        })
-                    elif compiled_rule.get('conclusion') == 'invalid':
-                        # This rule indicates invalidity
-                        violated_rules.append(compiled_rule)
-                        failed_rules.append(compiled_rule)
-                        rule_results.append({
-                            'rule_id': compiled_rule['id'],
-                            'result': 'fail',
-                            'description': compiled_rule['description'],
-                            'reason': 'Rule condition satisfied and indicates invalidity'
-                        })
+                    supporting_rules.append(compiled_rule)
+                    rule_results.append({
+                        'rule_id': compiled_rule['id'],
+                        'result': 'pass',
+                        'description': compiled_rule['description'],
+                        'reason': 'Rule condition satisfied and supports validity'
+                    })
+                elif must_fire and conclusion == 'invalid':
+                    applicable_rules.append(compiled_rule)
+                    violated_rules.append(compiled_rule)
+                    failed_rules.append(compiled_rule)
+                    rule_results.append({
+                        'rule_id': compiled_rule['id'],
+                        'result': 'fail',
+                        'description': compiled_rule['description'],
+                        'reason': 'Rule condition satisfied and indicates invalidity'
+                    })
+                elif can_fire:
+                    skipped_rules.append(compiled_rule)
+                    (open_denies if conclusion == 'invalid' else open_permits).extend(unknown_here)
+                    rule_results.append({
+                        'rule_id': compiled_rule['id'],
+                        'result': 'skipped',
+                        'description': compiled_rule['description'],
+                        'reason': f'Depends on unknown facts: {", ".join(unknown_here) or "unknown"}',
+                    })
                 else:
-                    # Rule condition is FALSE - rule is not applicable
                     rule_results.append({
                         'rule_id': compiled_rule['id'],
                         'result': 'not_applicable',
                         'description': compiled_rule['description'],
                         'reason': 'Rule condition not satisfied, rule does not apply'
                     })
-            
-            # Enhanced result determination with rule skipping logic
-            if len(effective_variables) == 0:
-                # No effective variables - insufficient information
-                overall_result = VerificationResult.NEEDS_CLARIFICATION
-                explanation = "❓ Unable to extract sufficient information from the question and answer to evaluate the policy."
-                
-                # Use rule-based clarifying questions for now (LLM integration in API layer)
-                suggestions = self.generate_clarifying_questions(applicable_rules, effective_variables, policy_rules)
-            elif len(violated_rules) > 0:
+
+            for label, constraint in policy_constraints:
+                # Already-violated constraints returned INVALID above; here only "may be violated".
+                try:
+                    may_break = self._holds(solver, Not(constraint))
+                except Exception:
+                    may_break = True
+                if may_break:
+                    unknown_here = [name for name in unknown_variables
+                                    if re.search(r'\b' + re.escape(name) + r'\b', label)]
+                    open_denies.extend(unknown_here or ["__rule_error__"])
+                    rule_results.append({
+                        'rule_id': label,
+                        'result': 'skipped',
+                        'description': f"Global constraint: {label}",
+                        'reason': f'Depends on unknown facts: {", ".join(unknown_here) or "unknown"}',
+                    })
+
+            def _needed(*groups: List[str]) -> List[str]:
+                seen: List[str] = []
+                for group in groups:
+                    for name in group:
+                        if name not in seen and name != "__rule_error__":
+                            seen.append(name)
+                return seen
+
+            if violated_rules:
                 overall_result = VerificationResult.INVALID
                 explanation = self.explain_verification_result(False, failed_rules)
                 suggestions = self.generate_suggestions(failed_rules, effective_variables)
-            elif len(supporting_rules) > 0:
+                extra = {}
+            elif missing_mandatory or open_denies:
+                # A deny rule that may still fire blocks approval, even when its unknown fact is optional.
+                needed = _needed(missing_mandatory, open_denies)
+                overall_result = VerificationResult.NEEDS_CLARIFICATION
+                if needed:
+                    explanation = f"Missing required information for: {', '.join(needed)}"
+                else:
+                    explanation = "A policy rule could not be evaluated; route to human review."
+                suggestions = self._generate_mandatory_questions(needed)
+                extra = {'missing_mandatory_vars': needed}
+            elif supporting_rules:
                 overall_result = VerificationResult.VALID
                 explanation = self.explain_verification_result(True, [])
                 suggestions = []
+                extra = {}
+            elif open_permits:
+                needed = _needed(open_permits)
+                overall_result = VerificationResult.NEEDS_CLARIFICATION
+                explanation = f"Missing required information for: {', '.join(needed)}"
+                suggestions = self._generate_mandatory_questions(needed)
+                extra = {'missing_mandatory_vars': needed}
             else:
-                # No rules apply - could be due to skipping or insufficient information
-                if len(skipped_rules) > 0:
-                    overall_result = VerificationResult.VALID  # Conservative approach - if no violating rules and some skipped, assume valid
-                    explanation = f"✅ No policy violations found. {len(skipped_rules)} rule(s) were skipped due to insufficient optional information."
-                    suggestions = []
-                else:
-                    overall_result = VerificationResult.NEEDS_CLARIFICATION
-                    explanation = "❓ Unable to determine validity - no policy rules apply to this scenario based on the available information."
-                    suggestions = self.generate_clarifying_questions(applicable_rules, effective_variables, policy_rules)
-            
-            # Add comprehensive rule summary to explanation
-            total_rules = len(reconstructed_policy['rules'])
-            active_rules = len(applicable_rules) + len(violated_rules)
-            
-            if len(skipped_rules) > 0 or active_rules < total_rules:
-                explanation += f"\n\n📊 Rule Summary: {active_rules} active, {len(skipped_rules)} skipped, {total_rules - active_rules - len(skipped_rules)} not applicable"
-            
+                overall_result = VerificationResult.NEEDS_CLARIFICATION
+                explanation = "No policy rule covers this case; route to human review."
+                suggestions = self.generate_clarifying_questions(applicable_rules, effective_variables, policy_rules)
+                extra = {'uncovered': True}
+
+            if overall_result != VerificationResult.NEEDS_CLARIFICATION or 'uncovered' not in extra:
+                if overall_result != VerificationResult.NEEDS_CLARIFICATION or not extra.get('missing_mandatory_vars'):
+                    total_rules = len(reconstructed_policy['rules'])
+                    active_rules = len(applicable_rules)
+                    if skipped_rules or active_rules < total_rules:
+                        explanation += (
+                            f"\n\nRule Summary: {active_rules} active, {len(skipped_rules)} skipped, "
+                            f"{total_rules - active_rules - len(skipped_rules)} not applicable"
+                        )
+
             return {
-                'result': overall_result.value if isinstance(overall_result, VerificationResult) else overall_result,
+                'result': overall_result.value,
                 'rule_results': rule_results,
                 'failed_rules': [rule['id'] for rule in failed_rules],
                 'explanation': explanation,
-                'suggestions': suggestions
+                'suggestions': suggestions,
+                **extra,
             }
             
         except Exception as e:
@@ -281,17 +311,70 @@ class VerificationService:
                 'explanation': f"Verification failed: {str(e)}",
                 'suggestions': []
             }
+
+    def _add_assignments(self, solver, z3_vars: Dict[str, Any], variables: Dict[str, Any]) -> None:
+        """Bind known values. Number variables are Reals, including integers."""
+        for var_name, var_value in variables.items():
+            if var_name not in z3_vars:
+                continue
+            z3_var = z3_vars[var_name]
+            try:
+                if isinstance(var_value, bool):
+                    solver.add(z3_var == BoolVal(var_value))
+                elif isinstance(var_value, str):
+                    solver.add(z3_var == StringVal(var_value))
+                elif isinstance(var_value, (int, float)):
+                    if z3_var.sort() == RealSort():
+                        solver.add(z3_var == RealVal(str(var_value)))
+                    else:
+                        solver.add(z3_var == IntVal(int(var_value)))
+            except Exception as z3_error:
+                print(f"Warning: Skipping variable {var_name} due to Z3 error: {str(z3_error)}")
+
+    @staticmethod
+    def _is_range_constraint(label: str, numeric: set) -> bool:
+        """`x > 0`, `hours <= 24`: one numeric variable against a number."""
+        match = re.fullmatch(r"\s*(\w+)\s*(>=|<=|>|<)\s*-?\d+(?:\.\d+)?\s*", str(label))
+        return bool(match) and match.group(1) in numeric
+
+    @staticmethod
+    def _holds(solver, condition) -> bool:
+        """True when `condition` is satisfiable together with the known facts."""
+        solver.push()
+        try:
+            solver.add(condition)
+            return solver.check() == sat
+        finally:
+            solver.pop()
+
+    def _violated_constraints(self, z3_vars, constraints, labels, variables) -> List[str]:
+        """Return original constraint texts already falsified by known facts."""
+        violated = []
+        for index, constraint in enumerate(constraints):
+            label = labels[index] if index < len(labels) else f"constraint_{index}"
+            solver = Solver()
+            self._add_assignments(solver, z3_vars, variables)
+            try:
+                solver.add(constraint)
+                if solver.check() == unsat:
+                    violated.append(label)
+            except Exception:
+                continue
+        return violated
     
     def explain_verification_result(self, is_valid: bool, failed_rules: List[Dict]) -> str:
         """Generate human-readable explanation for verification result"""
         
         if is_valid:
-            return "✅ All policy rules are satisfied. The scenario is valid according to the policy."
+            return "All policy rules are satisfied. The scenario is valid according to the policy."
         else:
-            explanation = "❌ The scenario violates the following policy rules:\n\n"
+            explanation = "The scenario violates the following policy rules:\n\n"
             
             for rule in failed_rules:
-                explanation += f"• **{rule['id']}**: {rule['description']}\n"
+                # The condition is what Z3 checked; the description is model-written and can drift.
+                condition = (rule.get('original_rule') or {}).get('condition')
+                suffix = f" (rule: `{condition}`)" if condition else ""
+                explanation += f"- **{rule['id']}**: {rule['description']}{suffix}\n"
             
             explanation += "\nPlease review the failed rules and adjust the scenario accordingly."
             
@@ -308,28 +391,28 @@ class VerificationService:
             
             # Generate context-aware suggestions based on rule patterns
             if 'advance_notice' in rule_id.lower():
-                suggestions.append("📅 Consider submitting the request earlier to meet advance notice requirements")
+                suggestions.append("Consider submitting the request earlier to meet advance notice requirements")
             
             elif 'approval' in rule_id.lower():
-                suggestions.append("👤 Obtain manager approval before proceeding with the request")
+                suggestions.append("Obtain manager approval before proceeding with the request")
             
             elif 'duration' in rule_id.lower() or 'days' in rule_id.lower():
-                suggestions.append("⏱️ Consider reducing the duration or splitting into multiple shorter requests")
+                suggestions.append("Consider reducing the duration or splitting into multiple shorter requests")
             
             elif 'emergency' in rule_id.lower():
-                suggestions.append("🚨 Check if this qualifies as an emergency request with different requirements")
+                suggestions.append("Check if this qualifies as an emergency request with different requirements")
             
             elif 'eligibility' in rule_id.lower():
-                suggestions.append("✅ Verify that all eligibility criteria are met before submitting")
+                suggestions.append("Verify that all eligibility criteria are met before submitting")
             
             else:
                 # Generic suggestion based on rule description
-                suggestions.append(f"📋 Review the requirement: {description}")
+                suggestions.append(f"Review the requirement: {description}")
         
         # Add general suggestions
         if len(failed_rules) > 1:
-            suggestions.append("🔄 Consider breaking this into multiple separate requests")
-            suggestions.append("📞 Contact HR or your manager for guidance on policy compliance")
+            suggestions.append("Consider breaking this into multiple separate requests")
+            suggestions.append("Contact HR or your manager for guidance on policy compliance")
         
         return suggestions
     
@@ -358,7 +441,7 @@ class VerificationService:
         questions = []
         for var_name in missing_vars:
             questions.append(self._generate_variable_question(var_name))
-        return questions[:3]  # Limit to 3 questions
+        return questions
     
     def generate_clarifying_questions(self, applicable_rules: List[Dict], extracted_variables: Dict[str, Any], policy_rules: List[Dict]) -> List[str]:
         """Generate clarifying questions when rules don't provide sufficient context - now focused on mandatory variables only"""
@@ -373,7 +456,7 @@ class VerificationService:
                 question = self._generate_variable_question(var_name)
                 if question:
                     questions.append(question)
-            return questions[:3]  # Focus on mandatory variables only
+            return questions
         
         # Priority 2: If no mandatory missing but still need clarification, use generic questions
         # This should be rare with the new approach
@@ -383,16 +466,16 @@ class VerificationService:
             if len(extracted_variables) > 0:
                 # Have some variables but rules don't apply
                 questions.extend([
-                    "🔍 Are there any special circumstances or exceptions that might apply?",
-                    "📋 Does this situation involve any specific procedures or requirements?",
-                    "💼 What additional context would help evaluate this scenario?"
+                    "Are there any special circumstances or exceptions that might apply?",
+                    "Does this situation involve any specific procedures or requirements?",
+                    "What additional context would help evaluate this scenario?"
                 ])
             else:
                 # No variables extracted at all
                 questions.extend([
-                    "❓ Could you provide more specific details about this scenario?",
-                    "📝 What are the key facts or conditions involved?", 
-                    "🎯 What specific outcome or decision are you trying to verify?"
+                    "Could you provide more specific details about this scenario?",
+                    "What are the key facts or conditions involved?",
+                    "What specific outcome or decision are you trying to verify?"
                 ])
         
         return questions[:3]  # Limit to 3 questions to avoid overwhelming
@@ -404,28 +487,28 @@ class VerificationService:
         # Employment-related variables
         if 'employee' in var_lower or 'worker' in var_lower:
             if 'type' in var_lower:
-                return f"👤 What type of {var_name.replace('_', ' ')} is this?"
+                return f"What type of {var_name.replace('_', ' ')} is this?"
             else:
-                return f"👤 Could you specify the {var_name.replace('_', ' ')}?"
+                return f"Could you specify the {var_name.replace('_', ' ')}?"
         
         # Time-related variables
         if any(time_word in var_lower for time_word in ['days', 'hours', 'weeks', 'months', 'duration', 'time']):
-            return f"📅 What is the {var_name.replace('_', ' ')}?"
+            return f"What is the {var_name.replace('_', ' ')}?"
         
         # Approval/permission variables
         if any(approval_word in var_lower for approval_word in ['approval', 'permission', 'authorized', 'approved']):
-            return f"✅ Is there {var_name.replace('_', ' ')} for this request?"
+            return f"Is there {var_name.replace('_', ' ')} for this request?"
         
         # Amount/quantity variables
         if any(amount_word in var_lower for amount_word in ['amount', 'cost', 'budget', 'quantity', 'number']):
-            return f"💰 What is the {var_name.replace('_', ' ')}?"
+            return f"What is the {var_name.replace('_', ' ')}?"
         
         # Status variables
         if 'status' in var_lower or 'state' in var_lower:
-            return f"📊 What is the current {var_name.replace('_', ' ')}?"
+            return f"What is the current {var_name.replace('_', ' ')}?"
         
         # Generic question
-        return f"❓ Could you specify the {var_name.replace('_', ' ')}?"
+        return f"Could you specify the {var_name.replace('_', ' ')}?"
     
     def compile_and_verify(self, policy_dict: Dict[str, Any], question: str, answer: str, extracted_variables: Dict[str, Any]) -> Dict[str, Any]:
         """Compile policy and verify in one step (for testing/development)"""
@@ -433,14 +516,7 @@ class VerificationService:
         try:
             # Compile the policy
             compiled_policy = self.rule_compiler.compile_policy(policy_dict)
-            
-            # Create storage data structure
-            storage_data = {
-                'serializable_data': compiled_policy['serializable_data'],
-                'original_policy': policy_dict
-            }
-            # Serialize for storage (simulate database storage) using base64
-            serialized_constraints = base64.b64encode(pickle.dumps(storage_data)).decode('utf-8')
+            serialized_constraints = dumps_compilation(policy_dict, compiled_policy)
             
             # Extract policy rules for context
             policy_rules = policy_dict.get('rules', [])

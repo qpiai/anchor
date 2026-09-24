@@ -23,6 +23,7 @@ share/python-wheels/
 MANIFEST
 
 # Virtual Environment
+.venv/
 test_env/
 venv/
 env/
@@ -30,13 +31,18 @@ ENV/
 env.bak/
 venv.bak/
 
-# Environment Variables
+# Environment Variables and secrets (templates stay tracked)
 .env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-.env.docker
+.env.*
+!.env.example
+!.env.docker.example
+.streamlit/secrets.toml
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
 
 # IDE
 .vscode/
@@ -48,7 +54,6 @@ venv.bak/
 # Logs
 *.log
 logs/
-openai_proxy.log
 
 # Database
 *.db
@@ -88,3 +93,7 @@ coverage.xml
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# Benchmark harness, datasets, and raw outputs stay private. Only the write-up is public.
+bench/*
+!bench/RESULTS.md

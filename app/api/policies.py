@@ -14,9 +14,10 @@ from ..models.schemas import (
 )
 from pydantic import BaseModel
 
+from ..services.compiled_store import policy_dict_from_row
 from ..services.test_scenario_generator import TestScenarioGeneratorService
 from ..services.verification import VerificationService
-from ..services.variable_extractor import VariableExtractorService
+from ..services.extraction import get_variable_extractor
 from ..models.database import PolicyCompilation, CompilationStatus
 
 router = APIRouter(prefix="/policies", tags=["policies"])
@@ -199,6 +200,7 @@ async def clone_policy(
 class VariableUpdateRequest(BaseModel):
     is_mandatory: bool = None
     default_value: str = None
+    trusted_only: bool = None
 
 @router.patch("/{policy_id}/variables/{variable_name}")
 async def update_policy_variable(
@@ -227,6 +229,8 @@ async def update_policy_variable(
             # Update only provided fields
             if request.is_mandatory is not None:
                 variables[i]['is_mandatory'] = request.is_mandatory
+            if request.trusted_only is not None:
+                variables[i]['trusted_only'] = request.trusted_only
             if request.default_value is not None:
                 if request.default_value == "":  # Empty string means remove default
                     variables[i].pop('default_value', None)
@@ -259,6 +263,7 @@ class VariableCreateRequest(BaseModel):
     possible_values: List[str] = None
     is_mandatory: bool = True
     default_value: str = None
+    trusted_only: bool = False
 
 class RuleCreateRequest(BaseModel):
     id: str
@@ -298,7 +303,8 @@ async def add_policy_variable(
         "name": request.name,
         "type": request.type,
         "description": request.description,
-        "is_mandatory": request.is_mandatory
+        "is_mandatory": request.is_mandatory,
+        "trusted_only": request.trusted_only,
     }
     
     if request.possible_values:
@@ -626,7 +632,7 @@ async def run_test_scenarios(
     
     # Initialize services  
     verification_service = VerificationService()
-    variable_extractor = VariableExtractorService()
+    variable_extractor = get_variable_extractor()
     results = []
     passed_count = 0
     
@@ -643,7 +649,9 @@ async def run_test_scenarios(
             verification_result = verification_service.verify_scenario(
                 extracted_variables,
                 latest_compilation.z3_constraints,
-                policy.rules or []
+                policy.rules or [],
+                compilation_id=str(latest_compilation.id),
+                fallback_policy=policy_dict_from_row(policy),
             )
             
             # Map result to enum

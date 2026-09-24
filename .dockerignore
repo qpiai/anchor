@@ -4,6 +4,8 @@
 .env.*
 
 # Development files
+.venv
+venv
 __pycache__
 *.pyc
 *.pyo
@@ -25,3 +27,17 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Private local data and credentials
+bench/*
+!bench/RESULTS.md
+.streamlit/secrets.toml
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.db
+*.sqlite3
+uploads/*

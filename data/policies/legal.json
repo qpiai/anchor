@@ -1,0 +1,200 @@
+{
+  "name": "contract_approval_and_signing",
+  "description": "Defines contract signing authority, value-based approval requirements, vendor documentation requirements, and approved digital signature software requirements.",
+  "domain": "legal",
+  "version": "1.0",
+  "variables": [
+    {
+      "name": "contract_value",
+      "type": "number",
+      "description": "Total monetary value of the contract in US dollars.",
+      "is_mandatory": true
+    },
+    {
+      "name": "signer_position",
+      "type": "enum",
+      "description": "The organizational position of the person signing the contract.",
+      "possible_values": [
+        "c_level_executive",
+        "director",
+        "manager",
+        "employee",
+        "other"
+      ],
+      "is_mandatory": true
+    },
+    {
+      "name": "has_written_legal_delegation",
+      "type": "boolean",
+      "description": "Whether Legal has provided written delegation authorizing a manager or employee to sign this contract.",
+      "is_mandatory": false
+    },
+    {
+      "name": "has_legal_manager_approval",
+      "type": "boolean",
+      "description": "Whether the Legal Manager approved the contract. Required for contracts valued at $50,000 or less.",
+      "is_mandatory": false
+    },
+    {
+      "name": "has_head_of_legal_approval",
+      "type": "boolean",
+      "description": "Whether the Head of Legal approved the contract. Required for contracts valued above $50,000.",
+      "is_mandatory": false
+    },
+    {
+      "name": "has_cfo_approval",
+      "type": "boolean",
+      "description": "Whether the CFO approved the contract. Also required for contracts valued above $250,000.",
+      "is_mandatory": false
+    },
+    {
+      "name": "vendor_provided_tin",
+      "type": "boolean",
+      "description": "Whether the vendor provided its Tax Identification Number (TIN).",
+      "is_mandatory": false
+    },
+    {
+      "name": "vendor_provided_certificate_of_incorporation",
+      "type": "boolean",
+      "description": "Whether the vendor provided its Certificate of Incorporation.",
+      "is_mandatory": false
+    },
+    {
+      "name": "is_digital_signing",
+      "type": "boolean",
+      "description": "Whether the contract will be signed using digital signature software.",
+      "is_mandatory": false
+    },
+    {
+      "name": "is_company_approved_signature_software",
+      "type": "boolean",
+      "description": "Whether the digital signature software used is approved by the company.",
+      "is_mandatory": false
+    }
+  ],
+  "rules": [
+    {
+      "id": "rule_001",
+      "description": "Contracts with a nonnegative stated value may proceed subject to the policy's approval, signing, vendor documentation, and signature software requirements.",
+      "condition": "contract_value >= 0",
+      "conclusion": "valid",
+      "priority": 1
+    },
+    {
+      "id": "rule_002",
+      "description": "A contract is invalid if it is signed by someone who is not a C-level executive or director and has no written delegation from Legal.",
+      "condition": "signer_position != \"c_level_executive\" AND signer_position != \"director\" AND has_written_legal_delegation != true",
+      "conclusion": "invalid",
+      "priority": 2
+    },
+    {
+      "id": "rule_003",
+      "description": "Contracts valued at $50,000 or less are invalid without Legal Manager approval.",
+      "condition": "contract_value <= 50000 AND has_legal_manager_approval != true",
+      "conclusion": "invalid",
+      "priority": 3
+    },
+    {
+      "id": "rule_004",
+      "description": "Contracts valued above $50,000 and at or below $250,000 are invalid without Head of Legal approval.",
+      "condition": "contract_value > 50000 AND contract_value <= 250000 AND has_head_of_legal_approval != true",
+      "conclusion": "invalid",
+      "priority": 4
+    },
+    {
+      "id": "rule_005",
+      "description": "Contracts valued above $250,000 are invalid without Head of Legal approval.",
+      "condition": "contract_value > 250000 AND has_head_of_legal_approval != true",
+      "conclusion": "invalid",
+      "priority": 5
+    },
+    {
+      "id": "rule_006",
+      "description": "Contracts valued above $250,000 are invalid without CFO approval.",
+      "condition": "contract_value > 250000 AND has_cfo_approval != true",
+      "conclusion": "invalid",
+      "priority": 6
+    },
+    {
+      "id": "rule_007",
+      "description": "A contract is invalid if the vendor has not provided its Tax Identification Number.",
+      "condition": "vendor_provided_tin != true",
+      "conclusion": "invalid",
+      "priority": 7
+    },
+    {
+      "id": "rule_008",
+      "description": "A contract is invalid if the vendor has not provided its Certificate of Incorporation.",
+      "condition": "vendor_provided_certificate_of_incorporation != true",
+      "conclusion": "invalid",
+      "priority": 8
+    },
+    {
+      "id": "rule_009",
+      "description": "Digital signing is invalid if the signature software is not company-approved.",
+      "condition": "is_digital_signing == true AND is_company_approved_signature_software != true",
+      "conclusion": "invalid",
+      "priority": 9
+    }
+  ],
+  "constraints": [
+    "contract_value >= 0"
+  ],
+  "examples": [
+    {
+      "question": "Can a $40,000 contract be signed by a director after Legal Manager approval if the vendor supplied both required documents?",
+      "variables": {
+        "contract_value": 40000,
+        "signer_position": "director",
+        "has_legal_manager_approval": true,
+        "vendor_provided_tin": true,
+        "vendor_provided_certificate_of_incorporation": true,
+        "is_digital_signing": false
+      },
+      "expected_result": "valid",
+      "explanation": "The signer is an authorized signatory, the Legal Manager approved the contract within the applicable value band, and both required vendor documents were provided."
+    },
+    {
+      "question": "Can a $300,000 contract proceed with Head of Legal approval but no CFO approval?",
+      "variables": {
+        "contract_value": 300000,
+        "signer_position": "c_level_executive",
+        "has_head_of_legal_approval": true,
+        "has_cfo_approval": false,
+        "vendor_provided_tin": true,
+        "vendor_provided_certificate_of_incorporation": true,
+        "is_digital_signing": false
+      },
+      "expected_result": "invalid",
+      "explanation": "Contracts valued above $250,000 require approval from both the Head of Legal and the CFO."
+    },
+    {
+      "question": "Can a manager sign a $20,000 contract without written delegation from Legal?",
+      "variables": {
+        "contract_value": 20000,
+        "signer_position": "manager",
+        "has_written_legal_delegation": false,
+        "has_legal_manager_approval": true,
+        "vendor_provided_tin": true,
+        "vendor_provided_certificate_of_incorporation": true,
+        "is_digital_signing": false
+      },
+      "expected_result": "invalid",
+      "explanation": "Managers cannot sign contracts without written delegation from Legal."
+    },
+    {
+      "question": "Can a $75,000 contract be digitally signed using unapproved software?",
+      "variables": {
+        "contract_value": 75000,
+        "signer_position": "director",
+        "has_head_of_legal_approval": true,
+        "vendor_provided_tin": true,
+        "vendor_provided_certificate_of_incorporation": true,
+        "is_digital_signing": true,
+        "is_company_approved_signature_software": false
+      },
+      "expected_result": "invalid",
+      "explanation": "Digital signing must use company-approved signature software."
+    }
+  ]
+}

@@ -1,0 +1,121 @@
+{
+  "policy_name": "AI Support Agent Action Gate",
+  "domain": "agent_actions",
+  "version": "1.0",
+  "description": "Policy gating actions an AI support agent may take on a customer account.",
+  "variables": [
+    {
+      "name": "action_type",
+      "type": "enum",
+      "description": "The action the agent proposes to take.",
+      "possible_values": [
+        "refund",
+        "delete_customer_data",
+        "send_external_email",
+        "make_payment",
+        "read_only_lookup"
+      ],
+      "is_mandatory": true
+    },
+    {
+      "name": "amount",
+      "type": "number",
+      "description": "USD amount of a refund or payment. Zero or omitted when the action moves no money.",
+      "is_mandatory": false
+    },
+    {
+      "name": "has_human_approval",
+      "type": "boolean",
+      "description": "A human supervisor has approved this specific action.",
+      "is_mandatory": true
+    },
+    {
+      "name": "customer_identity_verified",
+      "type": "boolean",
+      "description": "The customer's identity was verified before the action.",
+      "is_mandatory": true
+    },
+    {
+      "name": "is_business_purpose",
+      "type": "boolean",
+      "description": "The action serves a legitimate business purpose for the customer's own account (not personal, not for a third party, not a favor).",
+      "is_mandatory": true
+    }
+  ],
+  "rules": [
+    {
+      "id": "small_refund_allowed",
+      "description": "A refund of 100 USD or less is allowed.",
+      "condition": "action_type == 'refund' AND amount <= 100",
+      "conclusion": "valid",
+      "priority": 1
+    },
+    {
+      "id": "large_refund_needs_approval",
+      "description": "A refund over 100 USD without human approval is not allowed.",
+      "condition": "action_type == 'refund' AND amount > 100 AND has_human_approval == false",
+      "conclusion": "invalid",
+      "priority": 2
+    },
+    {
+      "id": "delete_requires_identity",
+      "description": "Deleting customer data without verified identity is not allowed.",
+      "condition": "action_type == 'delete_customer_data' AND customer_identity_verified == false",
+      "conclusion": "invalid",
+      "priority": 3
+    },
+    {
+      "id": "delete_requires_approval",
+      "description": "Deleting customer data without human approval is not allowed.",
+      "condition": "action_type == 'delete_customer_data' AND has_human_approval == false",
+      "conclusion": "invalid",
+      "priority": 4
+    },
+    {
+      "id": "payment_requires_approval",
+      "description": "Making a payment without human approval is not allowed.",
+      "condition": "action_type == 'make_payment' AND has_human_approval == false",
+      "conclusion": "invalid",
+      "priority": 5
+    },
+    {
+      "id": "business_purpose_required",
+      "description": "Any action that is not a legitimate business purpose for the customer's own account is not allowed.",
+      "condition": "is_business_purpose == false",
+      "conclusion": "invalid",
+      "priority": 6
+    },
+    {
+      "id": "read_only_lookup_allowed",
+      "description": "A read-only lookup is allowed.",
+      "condition": "action_type == 'read_only_lookup'",
+      "conclusion": "valid",
+      "priority": 7
+    },
+    {
+      "id": "approved_large_refund",
+      "description": "A refund above 100 dollars is allowed with human supervisor approval.",
+      "condition": "action_type == 'refund' AND amount > 100 AND has_human_approval == true",
+      "conclusion": "valid",
+      "priority": 8
+    },
+    {
+      "id": "approved_verified_deletion",
+      "description": "Deletion is allowed when identity is verified and a human supervisor approved it.",
+      "condition": "action_type == 'delete_customer_data' AND customer_identity_verified == true AND has_human_approval == true",
+      "conclusion": "valid",
+      "priority": 9
+    },
+    {
+      "id": "approved_payment",
+      "description": "A payment is allowed with human supervisor approval.",
+      "condition": "action_type == 'make_payment' AND has_human_approval == true",
+      "conclusion": "valid",
+      "priority": 10
+    }
+  ],
+  "constraints": [
+    "amount >= 0"
+  ],
+  "examples": []
+}

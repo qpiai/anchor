@@ -1,9 +1,13 @@
 import json
+import logging
 import asyncio
 from typing import Dict, Any, List
 import openai
 import anthropic
 from ..core.config import settings, get_openai_api_params
+from .policy_repair import ensure_policy_compiles, ensure_policy_semantics
+
+logger = logging.getLogger(__name__)
 
 class PolicyGeneratorService:
     def __init__(self):
@@ -55,8 +59,10 @@ class PolicyGeneratorService:
         6. STRING VALUES MUST BE IN QUOTES: employee_type == "permanent"
         7. NUMBERS WITHOUT QUOTES: tenure_months >= 12
         8. CONCLUSIONS must be simple text descriptions, NOT variable assignments
-        9. Use "valid" or "invalid" as conclusions for rule enforcement
-        10. ❌ MANDATORY VARIABLES MUST NOT HAVE DEFAULT VALUES - this defeats clarification logic
+        9. Use "valid" or "invalid" as conclusions. VALID needs one "valid" rule to apply and no "invalid" rule to apply. Every limit, cap, deadline, or required approval MUST be an "invalid" rule describing the breach; "valid" rules are standalone permissions only
+        10. A variable is is_mandatory true ONLY if EVERY decision under the policy depends on it (who, what, how much, how long). Extensions, approvals, procedure details, and other partial-path facts are is_mandatory false with no default_value. Rare exceptional or adverse conditions a requester would mention if they applied (fault, damage, overnight use, repair) are is_mandatory false with default_value "false".
+        12. "constraints" hold only single-number ranges such as "leave_days > 0". Business rules go in "rules".
+        11. Mandatory variables must not have a default_value.
         
         REQUIRED JSON SCHEMA:
         {{
@@ -66,11 +72,17 @@ class PolicyGeneratorService:
           "description": "string",
           "variables": [
             {{
-              "name": "variable_name",
-              "type": "string|number|boolean|enum",
-              "description": "description",
-              "possible_values": ["val1", "val2"],
+              "name": "employee_type",
+              "type": "enum",
+              "description": "Who is requesting. Every leave decision depends on this.",
+              "possible_values": ["full_time", "contractor"],
               "is_mandatory": true
+            }},
+            {{
+              "name": "has_manager_approval",
+              "type": "boolean",
+              "description": "Whether an extension beyond the normal limit was approved. Only extension rules use this.",
+              "is_mandatory": false
             }}
           ],
           "rules": [
@@ -122,7 +134,21 @@ class PolicyGeneratorService:
             validation_errors = await self.validate_generated_policy(policy_dict)
             if validation_errors:
                 raise Exception(f"Policy validation failed: {validation_errors}")
-            
+
+            policy_dict, compile_errors = await ensure_policy_compiles(
+                policy_dict,
+                self._repair_policy,
+            )
+            leaky: List[str] = []
+            if not compile_errors:
+                async def repair_semantics(policy: Dict, problems: List[str]) -> Dict:
+                    return await self._repair_policy(policy, problems, source=document_content)
+                policy_dict, leaky = await ensure_policy_semantics(policy_dict, repair_semantics)
+            policy_dict["_compile_errors"] = compile_errors
+            policy_dict["_semantic_warnings"] = [
+                f"Rule {rule_id} is a permission that never restricts anything; if it is a limit, "
+                "rewrite it as an invalid rule." for rule_id in leaky
+            ]
             return policy_dict
             
         except Exception as e:
@@ -224,6 +250,40 @@ class PolicyGeneratorService:
         
         return errors
     
+    async def _repair_policy(self, policy: Dict, errors: List[str], source: str | None = None) -> Dict:
+        """Ask GPT for a full corrected policy given compiler or semantics errors."""
+        system_prompt = (
+            "You repair machine-verifiable policy JSON. "
+            "Return ONLY the full corrected policy JSON. "
+            "Every name used in a rule condition must be declared in variables "
+            "with a type (string, number, boolean, date, or enum), a description, "
+            "and possible_values when the type is enum or the values are closed. "
+            "Alternatively drop the rule that references an undeclared name. "
+            "Keep the same schema: policy_name, domain, version, description, "
+            "variables, rules, constraints, examples. "
+            "Keep is_mandatory true only for variables every decision depends on. "
+            "Extensions, approvals, and procedure details stay is_mandatory false with no default_value."
+        )
+        user_prompt = (
+            "The policy has problems.\n\n"
+            f"Problems:\n{json.dumps(errors)}\n\n"
+            + (f"Source document:\n{source}\n\n" if source else "")
+            + f"Policy:\n{json.dumps(policy)}\n\n"
+            "Return the full corrected policy JSON."
+        )
+        logger.info("Asking the model to repair policy compile errors: %s", errors)
+        if settings.default_llm_provider == "openai" and self.openai_client:
+            response = await self._generate_with_openai(system_prompt, user_prompt)
+        elif self.anthropic_client:
+            response = await self._generate_with_anthropic(system_prompt, user_prompt)
+        else:
+            raise Exception("No LLM provider configured for policy repair")
+        repaired = json.loads(self._extract_json_from_response(response))
+        structural = await self.validate_generated_policy(repaired)
+        if structural:
+            raise Exception(f"Repaired policy failed structural validation: {structural}")
+        return repaired
+
     async def _generate_with_openai(self, system_prompt: str, user_prompt: str) -> str:
         """Generate response using OpenAI"""
         print(f"PolicyGeneratorService: calling OpenAI (base_url={settings.openai_base_url}, model={settings.openai_model})")
@@ -294,13 +354,20 @@ class PolicyGeneratorService:
 
     ## Rule Structure Requirements
 
-    ### Conclusions - ONLY TWO OPTIONS:
-    - **"valid"**: Use when the condition describes a valid/allowed scenario
-    - **"invalid"**: Use when the condition describes an invalid/forbidden scenario
+    ### Conclusions - ONLY TWO OPTIONS, and how the verifier combines them:
+    A request is VALID only when at least one "valid" rule applies AND no "invalid" rule applies.
+    "valid" rules are alternatives (OR): each one must be a complete, standalone reason to approve,
+    such as basic eligibility ("full-time employees may take leave").
+    - **"valid"**: a standalone permission. Never use "valid" for a limit, cap, deadline, or approval
+      requirement: a "valid" rule that fails does not block anything, so the limit would be ignored.
+    - **"invalid"**: a violation. Write EVERY limit, cap, minimum, deadline, prohibited case, and
+      required approval as an "invalid" rule that describes breaking it, e.g.
+      "leave_days > 30 AND has_manager_approval != true" -> "invalid".
+    Test: if a request fails this rule, must it be refused? Then it is an "invalid" rule.
 
     ### Condition Logic:
     - **CONDITIONS MUST use variable names with operators**: employee_type == "full_time" AND tenure_years >= 2
-    - **NEVER use plain English**: ❌ "Eligible for LoA" ✅ "employee_type == 'permanent' AND employment_duration >= 90"
+    - **NEVER use plain English**. Write employee_type == "permanent" AND employment_duration >= 90, not "Eligible for LoA".
     - **Supported operators**: ==, !=, <, >, <=, >=, AND, OR, NOT
     - **String values in quotes**: department == "HR" 
     - **Numbers without quotes**: salary > 50000
@@ -318,8 +385,7 @@ class PolicyGeneratorService:
           "type": "string|number|boolean|date|enum",
           "description": "Clear description for LLM extraction",
           "possible_values": ["value1", "value2"],
-          "is_mandatory": true,
-          "default_value": "optional_default"
+          "is_mandatory": true
         }
       ],
       "rules": [
@@ -351,35 +417,69 @@ class PolicyGeneratorService:
     - **Use boolean flags** for yes/no decisions
     
     ## Mandatory vs Optional Variables
-    - **is_mandatory: true** - Required for policy evaluation (e.g., employee_id, request_amount)
-      ❌ **NEVER give default_value to mandatory variables** - defeats the purpose of being mandatory
-      ✅ **Mandatory variables without defaults trigger NEEDS_CLARIFICATION** when missing
-    - **is_mandatory: false** - Optional variables that may not always be available
-      ✅ **default_value** - Used when optional variables cannot be extracted from text
-      ✅ **No default_value** - Rules using this optional variable will be skipped if unknown
+    Set is_mandatory true only when EVERY decision under the policy depends on that variable.
+    Core facts are who is asking, what is requested, how much, and how long.
+    Most policies have only two to four mandatory variables.
+    A missing mandatory variable, with no default_value, triggers NEEDS_CLARIFICATION.
+
+    Set is_mandatory false when the variable matters for only some rules. Then choose its default:
+    - No default_value for a fact the decision must ask about when it matters: approvals, identity
+      checks, submission method, recipient. If such a fact is unstated and a rule could deny on it,
+      the verifier asks for it (a request for 45 days with no word on approval gets a question).
+    - The default that means "nothing is wrong" for an exceptional or adverse condition a requester
+      would mention if it applied: "false" for fault_or_damage_exists, is_overnight_use, repair_performed;
+      "true" for a positively phrased catch-all such as safety_rules_compliant. Without a default,
+      every ordinary request would be asked about every rare exception.
+    Examples with no default: has_manager_approval, submission_method, recipient_department.
+    Examples with default "false": fault_or_damage_exists, is_overnight_use, repair_performed.
+
+    ## Constraints
+    Use "constraints" ONLY for the range of a single number, e.g. "leave_days > 0",
+    "consecutive_use_hours <= 24". Never put a business rule in constraints: a limit, an approval,
+    an allowed method, or anything that relates two variables belongs in "rules" as an "invalid" rule.
+
+    Before output, check each variable. If any complete decision does not use it, it is optional.
 
     ## Rule Writing Patterns
 
-    ### Pattern 1: Approval Requirements
+    ### Pattern 1: Approval requirement (a deny rule, never a permit)
     {
       "id": "manager_approval_required",
-      "condition": "amount > 1000 AND has_manager_approval == true",
-      "conclusion": "valid"
+      "condition": "amount > 1000 AND has_manager_approval != true",
+      "conclusion": "invalid"
     }
 
-    ### Pattern 2: Eligibility Rules  
+    ### Pattern 2: Eligibility (one permit for who qualifies, one deny for who does not)
     {
-      "id": "employee_eligibility",
+      "id": "eligible_employees",
+      "condition": "employee_type == 'full_time'",
+      "conclusion": "valid"
+    }
+    {
+      "id": "ineligible_contractors",
       "condition": "employee_type == 'contractor'",
       "conclusion": "invalid"
     }
 
-    ### Pattern 3: Time-based Rules
+    ### Pattern 3: Limit with an exception (deny the breach unless the exception holds)
+    {
+      "id": "max_duration",
+      "condition": "leave_days > 30 AND has_manager_approval != true",
+      "conclusion": "invalid"
+    }
+
+    ### Pattern 4: Deadline
     {
       "id": "advance_notice",
-      "condition": "notice_days >= 14 AND request_type == 'vacation'",
-      "conclusion": "valid"
+      "condition": "request_type == 'vacation' AND notice_days < 14",
+      "conclusion": "invalid"
     }
+
+    ### Coverage
+    Every requirement in the document that decides approval must appear as a rule. If a requirement
+    needs a fact (for example who approved a large contract), declare a variable for it rather than
+    dropping the requirement. Do not turn routing text ("approved by the Head of Legal") into a
+    permission on its own.
 
     Remember: Each rule should be atomic and test one specific aspect of the policy.
     """
